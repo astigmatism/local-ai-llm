@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+.DS_Store
+.vscode/
+.idea/
+config/*.json
+!config/.gitkeep
+*.zip

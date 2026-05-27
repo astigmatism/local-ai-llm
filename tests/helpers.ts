@@ -1,0 +1,108 @@
+import fs from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequestHandler } from '../src/app.ts';
+import { ConfigStore } from '../src/config/store.ts';
+import { createLogger } from '../src/logger.ts';
+import type { GpuServiceLike, GpuTelemetry, OllamaClientLike, OllamaInstalledModel, OllamaRunningModel, RuntimeConfig } from '../src/types.ts';
+
+export function testRuntimeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
+  return {
+    host: '127.0.0.1',
+    port: 0,
+    ollamaBaseUrl: 'http://127.0.0.1:11434',
+    ollamaRequestTimeoutMs: 1000,
+    configPath: '/tmp/local-ai-llm-test.json',
+    defaultModel: 'qwen3:14b',
+    prewarmDefaultModelOnStart: false,
+    prewarmTimeoutMs: 1000,
+    prewarmKeepAlive: -1,
+    gpuQueryTimeoutMs: 1000,
+    logLevel: 'silent',
+    ...overrides
+  };
+}
+
+export async function tempConfigStore(defaultModel = 'qwen3:14b'): Promise<ConfigStore> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'local-ai-llm-'));
+  return new ConfigStore(path.join(directory, 'config.json'), defaultModel);
+}
+
+export function mockOllama(runningModels: OllamaRunningModel[] = [], installedModels: OllamaInstalledModel[] = []): OllamaClientLike {
+  return {
+    async getVersion() {
+      return '0.99.0-test';
+    },
+    async listRunningModels() {
+      return runningModels;
+    },
+    async listInstalledModels() {
+      return installedModels;
+    },
+    async prewarmModel(model: string, keepAlive: string | number) {
+      return { model, response: { done: true, done_reason: 'load', keep_alive: keepAlive } };
+    }
+  };
+}
+
+export function mockGpuService(gpus: GpuTelemetry[] = []): GpuServiceLike {
+  return {
+    async queryGpus() {
+      return gpus;
+    }
+  };
+}
+
+export async function withTestServer(dependencies: {
+  runtimeConfig?: RuntimeConfig;
+  configStore?: ConfigStore;
+  ollamaClient?: OllamaClientLike;
+  gpuService?: GpuServiceLike;
+}, fn: (baseUrl: string) => Promise<void>): Promise<void> {
+  const runtimeConfig = dependencies.runtimeConfig ?? testRuntimeConfig();
+  const configStore = dependencies.configStore ?? await tempConfigStore(runtimeConfig.defaultModel);
+  const ollamaClient = dependencies.ollamaClient ?? mockOllama();
+  const gpuService = dependencies.gpuService ?? mockGpuService();
+  const logger = createLogger('silent');
+  const server = createServer(createRequestHandler({ runtimeConfig, configStore, ollamaClient, gpuService, logger }));
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    await fn(baseUrl);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
+export const sampleGpu0: GpuTelemetry = {
+  index: 0,
+  uuid: 'GPU-3090',
+  name: 'NVIDIA GeForce RTX 3090',
+  driver_version: '595.71.05',
+  memory_total_mib: 24576,
+  memory_used_mib: 14168,
+  memory_free_mib: 9958,
+  utilization_gpu_percent: 0,
+  temperature_c: 45,
+  power_draw_w: 22.89,
+  power_limit_w: 420
+};
+
+export const sampleGpu1: GpuTelemetry = {
+  index: 1,
+  uuid: 'GPU-4080',
+  name: 'NVIDIA GeForce RTX 4080',
+  driver_version: '595.71.05',
+  memory_total_mib: 16384,
+  memory_used_mib: 0,
+  memory_free_mib: 16384,
+  utilization_gpu_percent: 0,
+  temperature_c: 40,
+  power_draw_w: 20,
+  power_limit_w: 320
+};

@@ -1,0 +1,28 @@
+{
+  "name": "local-ai-llm",
+  "version": "0.1.0",
+  "description": "Bare-metal local AI LLM monitor, portal, and Ollama control API for multi-GPU Ubuntu hosts.",
+  "type": "module",
+  "main": "src/index.ts",
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=11.0.0"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.ts",
+    "build": "node -e \"console.log('No transpilation required: Node 24 runs TypeScript via native type stripping.')\"",
+    "start": "node src/index.ts",
+    "test": "node --test tests/*.test.ts",
+    "typecheck": "node -e \"console.log('Static type checking is optional; run tsc --noEmit if TypeScript is installed.')\"",
+    "validate": "npm test && npm run build"
+  },
+  "keywords": [
+    "ollama",
+    "llm",
+    "nvidia",
+    "gpu",
+    "local-ai",
+    "node24"
+  ],
+  "license": "MIT"
+}
