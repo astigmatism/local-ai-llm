@@ -113,6 +113,32 @@ const gpuSchema = {
   }
 } as const;
 
+const generatedImageSchema = {
+  type: 'object',
+  required: ['mimeType', 'base64'],
+  properties: {
+    mimeType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp'] },
+    base64: { type: 'string' },
+    width: { type: 'number' },
+    height: { type: 'number' }
+  }
+} as const;
+
+const imageGenerationCapabilitySchema = {
+  type: 'object',
+  required: ['enabled', 'configuredModel', 'installed', 'available', 'endpoint', 'ollamaEndpoint', 'maxPromptChars'],
+  properties: {
+    enabled: { type: 'boolean' },
+    configuredModel: nullableString,
+    installed: { oneOf: [{ type: 'boolean' }, { type: 'null' }] },
+    available: { type: 'boolean' },
+    endpoint: { const: '/api/images/generate' },
+    ollamaEndpoint: { const: '/api/generate' },
+    maxPromptChars: { type: 'number' },
+    reason: { type: 'string' }
+  }
+} as const;
+
 const legacyGpuSchema = {
   type: 'object',
   required: [
@@ -177,6 +203,84 @@ export function buildOpenApiDocument() {
               }
             },
             '503': { description: 'Ollama unavailable', content: { 'application/json': { schema: errorSchema } } }
+          }
+        }
+      },
+      '/api/capabilities': {
+        get: {
+          summary: 'Service capability report',
+          description: 'Reports whether image generation is enabled, configured, and backed by an installed Ollama image model.',
+          responses: {
+            '200': {
+              description: 'Capability report',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    required: ['ok', 'textGeneration', 'textStreaming', 'imageGeneration'],
+                    properties: {
+                      ok: { const: true },
+                      textGeneration: { type: 'boolean' },
+                      textStreaming: { type: 'boolean' },
+                      imageGeneration: imageGenerationCapabilitySchema
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      '/api/images/generate': {
+        post: {
+          summary: 'Generate an image with the configured Ollama image model',
+          description: 'Private orchestrator-facing endpoint. It calls Ollama POST /api/generate with stream=false and requires IMAGE_GENERATION_ENABLED plus IMAGE_GENERATION_MODEL.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['prompt'],
+                  properties: {
+                    prompt: { type: 'string', minLength: 1 },
+                    model: { type: 'string', description: 'Optional override that must match IMAGE_GENERATION_MODEL.' },
+                    options: {
+                      type: 'object',
+                      properties: {
+                        width: { type: 'number' },
+                        height: { type: 'number' },
+                        steps: { type: 'number' }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            '200': {
+              description: 'Generated image data',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    required: ['ok', 'model', 'images', 'metadata'],
+                    properties: {
+                      ok: { const: true },
+                      model: { type: 'string' },
+                      images: { type: 'array', items: generatedImageSchema },
+                      metadata: { type: 'object', additionalProperties: true }
+                    }
+                  }
+                }
+              }
+            },
+            '400': { description: 'Unsupported model override', content: { 'application/json': { schema: errorSchema } } },
+            '404': { description: 'Configured image model is not installed', content: { 'application/json': { schema: errorSchema } } },
+            '422': { description: 'Validation error', content: { 'application/json': { schema: validationErrorSchema } } },
+            '502': { description: 'Ollama returned no valid image data', content: { 'application/json': { schema: errorSchema } } },
+            '503': { description: 'Image generation disabled, unconfigured, or Ollama unavailable', content: { 'application/json': { schema: errorSchema } } }
           }
         }
       },
@@ -316,7 +420,9 @@ export function buildOpenApiDocument() {
         RunningModel: runningModelSchema,
         InstalledModel: installedModelSchema,
         GpuTelemetry: gpuSchema,
-        LegacyGpuTelemetry: legacyGpuSchema
+        LegacyGpuTelemetry: legacyGpuSchema,
+        GeneratedImage: generatedImageSchema,
+        ImageGenerationCapability: imageGenerationCapabilitySchema
       }
     }
   };

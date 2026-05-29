@@ -6,7 +6,18 @@ import path from 'node:path';
 import { createRequestHandler } from '../src/app.ts';
 import { ConfigStore } from '../src/config/store.ts';
 import { createLogger } from '../src/logger.ts';
-import type { GpuServiceLike, GpuTelemetry, OllamaClientLike, OllamaInstalledModel, OllamaRunningModel, RuntimeConfig } from '../src/types.ts';
+import type {
+  GeneratedImageData,
+  GpuServiceLike,
+  GpuTelemetry,
+  OllamaClientLike,
+  OllamaImageGenerateRequest,
+  OllamaInstalledModel,
+  OllamaRunningModel,
+  RuntimeConfig
+} from '../src/types.ts';
+
+const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzLZhwAAAABJRU5ErkJggg==';
 
 export function testRuntimeConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -20,6 +31,10 @@ export function testRuntimeConfig(overrides: Partial<RuntimeConfig> = {}): Runti
     prewarmTimeoutMs: 1000,
     prewarmKeepAlive: -1,
     gpuQueryTimeoutMs: 1000,
+    imageGenerationEnabled: false,
+    imageGenerationModel: null,
+    imageGenerationTimeoutMs: 1000,
+    imageGenerationMaxPromptChars: 4000,
     logLevel: 'silent',
     ...overrides
   };
@@ -30,7 +45,12 @@ export async function tempConfigStore(defaultModel = 'qwen3:14b'): Promise<Confi
   return new ConfigStore(path.join(directory, 'config.json'), defaultModel);
 }
 
-export function mockOllama(runningModels: OllamaRunningModel[] = [], installedModels: OllamaInstalledModel[] = []): OllamaClientLike {
+export function mockOllama(
+  runningModels: OllamaRunningModel[] = [],
+  installedModels: OllamaInstalledModel[] = [],
+  generatedImage: GeneratedImageData = { mimeType: 'image/png', base64: tinyPngBase64, width: 1, height: 1 },
+  onGenerateImage?: (request: OllamaImageGenerateRequest) => void
+): OllamaClientLike {
   return {
     async getVersion() {
       return '0.99.0-test';
@@ -43,6 +63,14 @@ export function mockOllama(runningModels: OllamaRunningModel[] = [], installedMo
     },
     async prewarmModel(model: string, keepAlive: string | number) {
       return { model, response: { done: true, done_reason: 'load', keep_alive: keepAlive } };
+    },
+    async generateImage(request: OllamaImageGenerateRequest) {
+      onGenerateImage?.(request);
+      return {
+        model: request.model,
+        images: [generatedImage],
+        metadata: { done: true, done_reason: 'stop' }
+      };
     }
   };
 }

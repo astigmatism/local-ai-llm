@@ -38,6 +38,14 @@ function readString(name: string, fallback: string): string {
   return value === undefined || value.trim() === '' ? fallback : value.trim();
 }
 
+function readOptionalString(name: string): string | null {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') {
+    return null;
+  }
+  return value.trim();
+}
+
 function readNumber(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === '') {
@@ -81,6 +89,10 @@ export function loadRuntimeConfig(): RuntimeConfig {
     prewarmDefaultModelOnStart: readBoolean('PREWARM_DEFAULT_MODEL_ON_START', true),
     prewarmTimeoutMs: readNumber('PREWARM_TIMEOUT_MS', 120000),
     prewarmKeepAlive: readKeepAlive('PREWARM_KEEP_ALIVE', -1),
+    imageGenerationEnabled: readBoolean('IMAGE_GENERATION_ENABLED', false),
+    imageGenerationModel: readOptionalString('IMAGE_GENERATION_MODEL'),
+    imageGenerationTimeoutMs: readNumber('IMAGE_GENERATION_TIMEOUT_MS', 600000),
+    imageGenerationMaxPromptChars: readNumber('IMAGE_GENERATION_MAX_PROMPT_CHARS', 4000),
     gpuQueryTimeoutMs: readNumber('GPU_QUERY_TIMEOUT_MS', 5000),
     logLevel: readString('LOG_LEVEL', 'info')
   };

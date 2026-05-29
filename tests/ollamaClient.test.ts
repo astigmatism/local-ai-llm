@@ -52,3 +52,54 @@ test('OllamaClient maps 404 responses to OLLAMA_MODEL_NOT_FOUND', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test('OllamaClient generates images through /api/generate with stream false', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<[string, RequestInit]> = [];
+  const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lzLZhwAAAABJRU5ErkJggg==';
+
+  globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push([String(url), init ?? {}]);
+    return new Response(JSON.stringify({ model: 'sdxl:latest', image: pngBase64, done: true }), { status: 200 });
+  };
+
+  try {
+    const client = new OllamaClient('http://ollama.test/', 1000);
+    const result = await client.generateImage({
+      model: 'sdxl:latest',
+      prompt: 'a bear castle at sunset',
+      timeoutMs: 2000,
+      width: 1024,
+      height: 1024,
+      steps: 30
+    });
+    assert.equal(calls[0]?.[0], 'http://ollama.test/api/generate');
+    assert.deepEqual(JSON.parse(String(calls[0]?.[1].body)), {
+      model: 'sdxl:latest',
+      prompt: 'a bear castle at sunset',
+      stream: false,
+      width: 1024,
+      height: 1024,
+      steps: 30
+    });
+    assert.equal(result.model, 'sdxl:latest');
+    assert.equal(result.images[0]?.mimeType, 'image/png');
+    assert.equal(result.images[0]?.base64, pngBase64);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('OllamaClient rejects image-generation responses that do not contain image data', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ model: 'qwen3:14b', response: 'text only', done: true }), { status: 200 });
+
+  try {
+    const client = new OllamaClient('http://ollama.test', 1000);
+    await assert.rejects(client.generateImage({ model: 'qwen3:14b', prompt: 'draw a bear' }), (error: unknown) => {
+      return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OLLAMA_IMAGE_NOT_RETURNED';
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

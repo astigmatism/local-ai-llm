@@ -2,11 +2,11 @@ import fs from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { ConfigStore } from './config/store.ts';
-import { toErrorPayload, statusCodeForError } from './errors.ts';
+import { AppError, toErrorPayload, statusCodeForError } from './errors.ts';
 import type { Logger } from './logger.ts';
 import { buildOpenApiDocument } from './openapi.ts';
 import { toLegacyGpu } from './services/gpuService.ts';
-import type { AppConfig, GpuServiceLike, OllamaClientLike, RuntimeConfig } from './types.ts';
+import type { AppConfig, GpuServiceLike, OllamaClientLike, OllamaImageGenerateOptions, RuntimeConfig } from './types.ts';
 import { validateModelLoadRequest, validateModelName } from './utils/validation.ts';
 import { isDefaultModelLoaded } from './utils/modelState.ts';
 import { APPLICATION_VERSION, RUNTIME_NAME, SERVICE_NAME } from './version.ts';
@@ -69,6 +69,16 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
 
   if (method === 'GET' && pathName === '/health') {
     await handleHealth(response, configStore, ollamaClient, runtimeConfig);
+    return;
+  }
+
+  if (method === 'GET' && pathName === '/api/capabilities') {
+    await handleCapabilities(response, ollamaClient, runtimeConfig, logger);
+    return;
+  }
+
+  if (method === 'POST' && pathName === '/api/images/generate') {
+    await handleImageGeneration(request, response, ollamaClient, runtimeConfig);
     return;
   }
 
@@ -217,6 +227,238 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
   }
 
   sendJson(response, 404, { ok: false, error: { code: 'NOT_FOUND', message: `No route for ${method} ${pathName}` } });
+}
+
+
+interface ImageGenerationCapability {
+  enabled: boolean;
+  configuredModel: string | null;
+  installed: boolean | null;
+  available: boolean;
+  endpoint: '/api/images/generate';
+  ollamaEndpoint: '/api/generate';
+  maxPromptChars: number;
+  reason?: string;
+}
+
+async function handleCapabilities(response: ServerResponse, ollamaClient: OllamaClientLike, runtimeConfig: RuntimeConfig, logger: Logger): Promise<void> {
+  const imageGeneration = await resolveImageGenerationCapability(ollamaClient, runtimeConfig, logger);
+
+  sendJson(response, 200, {
+    ok: true,
+    textGeneration: false,
+    textStreaming: false,
+    imageGeneration
+  });
+}
+
+async function resolveImageGenerationCapability(
+  ollamaClient: OllamaClientLike,
+  runtimeConfig: RuntimeConfig,
+  logger: Logger
+): Promise<ImageGenerationCapability> {
+  const configuredModel = runtimeConfig.imageGenerationModel;
+  const baseCapability = {
+    enabled: runtimeConfig.imageGenerationEnabled,
+    configuredModel,
+    endpoint: '/api/images/generate' as const,
+    ollamaEndpoint: '/api/generate' as const,
+    maxPromptChars: runtimeConfig.imageGenerationMaxPromptChars
+  };
+
+  if (!runtimeConfig.imageGenerationEnabled) {
+    return {
+      ...baseCapability,
+      installed: null,
+      available: false,
+      reason: 'Image generation is disabled. Set IMAGE_GENERATION_ENABLED=true to enable it.'
+    };
+  }
+
+  if (!configuredModel) {
+    return {
+      ...baseCapability,
+      installed: null,
+      available: false,
+      reason: 'No image-generation model is configured. Set IMAGE_GENERATION_MODEL to an installed Ollama image model.'
+    };
+  }
+
+  try {
+    const installedModels = await ollamaClient.listInstalledModels();
+    const installed = modelListIncludes(installedModels, configuredModel);
+    return {
+      ...baseCapability,
+      installed,
+      available: installed,
+      ...(installed ? {} : { reason: `Configured image-generation model ${configuredModel} is not installed in Ollama.` })
+    };
+  } catch (error: unknown) {
+    logger.warn({ err: error, model: configuredModel }, 'Unable to verify configured image-generation model');
+    return {
+      ...baseCapability,
+      installed: null,
+      available: false,
+      reason: 'Unable to verify installed Ollama models for image generation.'
+    };
+  }
+}
+
+async function handleImageGeneration(
+  request: IncomingMessage,
+  response: ServerResponse,
+  ollamaClient: OllamaClientLike,
+  runtimeConfig: RuntimeConfig
+): Promise<void> {
+  const body = await readJsonBody(request);
+  const prompt = readBodyString(body, 'prompt');
+
+  if (!runtimeConfig.imageGenerationEnabled) {
+    sendJson(response, 503, {
+      ok: false,
+      error: {
+        code: 'IMAGE_GENERATION_DISABLED',
+        message: 'Image generation is disabled on local-ai-llm. Set IMAGE_GENERATION_ENABLED=true and configure IMAGE_GENERATION_MODEL.'
+      }
+    });
+    return;
+  }
+
+  if (!runtimeConfig.imageGenerationModel) {
+    sendJson(response, 503, {
+      ok: false,
+      error: {
+        code: 'IMAGE_MODEL_NOT_CONFIGURED',
+        message: 'Image generation is not configured on local-ai-llm. Set IMAGE_GENERATION_MODEL to an installed Ollama image-generation model.'
+      }
+    });
+    return;
+  }
+
+  if (!prompt) {
+    sendJson(response, 422, validationDetail(['body', 'prompt'], 'Prompt must be a non-empty string.', 'string_too_short'));
+    return;
+  }
+
+  if (prompt.length > runtimeConfig.imageGenerationMaxPromptChars) {
+    sendJson(response, 422, validationDetail(['body', 'prompt'], `Prompt must be ${runtimeConfig.imageGenerationMaxPromptChars} characters or fewer.`, 'string_too_long'));
+    return;
+  }
+
+  const requestedModel = readBodyString(body, 'model');
+  if (requestedModel && requestedModel !== runtimeConfig.imageGenerationModel) {
+    sendJson(response, 400, {
+      ok: false,
+      error: {
+        code: 'IMAGE_MODEL_OVERRIDE_NOT_ALLOWED',
+        message: 'Image generation model overrides are not allowed unless they match the configured IMAGE_GENERATION_MODEL.'
+      }
+    });
+    return;
+  }
+
+  let installedModels;
+  try {
+    installedModels = await ollamaClient.listInstalledModels();
+  } catch (error: unknown) {
+    sendJson(response, statusCodeForError(error, 503), toErrorPayload(error, 'OLLAMA_MODEL_DISCOVERY_FAILED'));
+    return;
+  }
+
+  if (!modelListIncludes(installedModels, runtimeConfig.imageGenerationModel)) {
+    sendJson(response, 404, {
+      ok: false,
+      error: {
+        code: 'IMAGE_MODEL_NOT_INSTALLED',
+        message: `Configured image-generation model ${runtimeConfig.imageGenerationModel} is not installed in Ollama.`
+      }
+    });
+    return;
+  }
+
+  const options = readImageOptions(body);
+  const abortController = new AbortController();
+  const abortImageGeneration = () => {
+    if (!response.writableEnded) abortController.abort();
+  };
+  request.on('aborted', abortImageGeneration);
+  response.on('close', abortImageGeneration);
+
+  try {
+    const result = await ollamaClient.generateImage({
+      model: runtimeConfig.imageGenerationModel,
+      prompt,
+      timeoutMs: runtimeConfig.imageGenerationTimeoutMs,
+      signal: abortController.signal,
+      ...options
+    });
+
+    sendJson(response, 200, {
+      ok: true,
+      model: result.model,
+      images: result.images,
+      metadata: {
+        provider: 'ollama',
+        endpoint: '/api/generate',
+        experimental: true,
+        ...result.metadata
+      }
+    });
+  } catch (error: unknown) {
+    sendJson(response, statusCodeForError(error, 502), toErrorPayload(error, 'IMAGE_GENERATION_FAILED'));
+  } finally {
+    request.off('aborted', abortImageGeneration);
+    response.off('close', abortImageGeneration);
+  }
+}
+
+function readImageOptions(body: unknown): OllamaImageGenerateOptions {
+  const record = isRecord(body) ? body : {};
+  const optionsRecord = isRecord(record.options) ? record.options : {};
+  const width = readPositiveInteger(record.width ?? optionsRecord.width, 4096);
+  const height = readPositiveInteger(record.height ?? optionsRecord.height, 4096);
+  const steps = readPositiveInteger(record.steps ?? optionsRecord.steps, 250);
+
+  return {
+    ...(width !== undefined ? { width } : {}),
+    ...(height !== undefined ? { height } : {}),
+    ...(steps !== undefined ? { steps } : {})
+  };
+}
+
+function readPositiveInteger(value: unknown, max: number): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > max) {
+    throw new AppError('IMAGE_OPTION_INVALID', `Image generation option must be a positive integer no larger than ${max}.`, 422);
+  }
+  return parsed;
+}
+
+function readBodyString(body: unknown, key: string): string | null {
+  if (!isRecord(body)) return null;
+  const value = body[key];
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+function modelListIncludes(models: Array<{ name?: string; model?: string }>, model: string): boolean {
+  const normalizedModel = model.toLowerCase();
+  return models.some((item) => item.name?.toLowerCase() === normalizedModel || item.model?.toLowerCase() === normalizedModel);
+}
+
+function validationDetail(loc: Array<string | number>, msg: string, type: string) {
+  return {
+    detail: [
+      {
+        loc,
+        msg,
+        type,
+        ctx: {}
+      }
+    ]
+  };
 }
 
 async function handleHealth(response: ServerResponse, configStore: ConfigStore, ollamaClient: OllamaClientLike, runtimeConfig: RuntimeConfig): Promise<void> {

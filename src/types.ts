@@ -8,6 +8,10 @@ export interface RuntimeConfig {
   prewarmDefaultModelOnStart: boolean;
   prewarmTimeoutMs: number;
   prewarmKeepAlive: string | number;
+  imageGenerationEnabled: boolean;
+  imageGenerationModel: string | null;
+  imageGenerationTimeoutMs: number;
+  imageGenerationMaxPromptChars: number;
   gpuQueryTimeoutMs: number;
   logLevel: string;
 }
@@ -48,6 +52,32 @@ export interface OllamaInstalledModel {
   [key: string]: unknown;
 }
 
+export interface GeneratedImageData {
+  mimeType: string;
+  base64: string;
+  width?: number;
+  height?: number;
+}
+
+export interface OllamaImageGenerateOptions {
+  width?: number;
+  height?: number;
+  steps?: number;
+}
+
+export interface OllamaImageGenerateRequest extends OllamaImageGenerateOptions {
+  model: string;
+  prompt: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface OllamaImageGenerateResult {
+  model: string;
+  images: GeneratedImageData[];
+  metadata: Record<string, unknown>;
+}
+
 export interface GpuTelemetry {
   index: number;
   uuid: string | null;
@@ -85,6 +115,7 @@ export interface OllamaClientLike {
   listRunningModels(): Promise<OllamaRunningModel[]>;
   listInstalledModels(): Promise<OllamaInstalledModel[]>;
   prewarmModel(model: string, keepAlive: string | number, timeoutMs?: number): Promise<PrewarmResult>;
+  generateImage(request: OllamaImageGenerateRequest): Promise<OllamaImageGenerateResult>;
 }
 
 export interface GpuServiceLike {
