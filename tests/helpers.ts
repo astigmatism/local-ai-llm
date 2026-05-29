@@ -13,6 +13,7 @@ import type {
   OllamaClientLike,
   OllamaImageGenerateRequest,
   OllamaInstalledModel,
+  OllamaModelInformation,
   OllamaRunningModel,
   RuntimeConfig
 } from '../src/types.ts';
@@ -48,7 +49,8 @@ export function mockOllama(
   runningModels: OllamaRunningModel[] = [],
   installedModels: OllamaInstalledModel[] = [],
   generatedImage: GeneratedImageData = { mimeType: 'image/png', base64: tinyPngBase64, width: 1, height: 1 },
-  onGenerateImage?: (request: OllamaImageGenerateRequest) => void
+  onGenerateImage?: (request: OllamaImageGenerateRequest) => void,
+  modelInfo: OllamaModelInformation = { capabilities: ['completion'] }
 ): OllamaClientLike {
   return {
     async getVersion() {
@@ -59,6 +61,9 @@ export function mockOllama(
     },
     async listInstalledModels() {
       return installedModels;
+    },
+    async showModel() {
+      return modelInfo;
     },
     async prewarmModel(model: string, keepAlive: string | number) {
       return { model, response: { done: true, done_reason: 'load', keep_alive: keepAlive } };

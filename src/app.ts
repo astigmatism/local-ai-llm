@@ -78,7 +78,7 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
   }
 
   if (method === 'POST' && pathName === '/api/images/generate') {
-    await handleImageGeneration(request, response, configStore, ollamaClient, runtimeConfig);
+    await handleImageGeneration(request, response, configStore, ollamaClient, runtimeConfig, logger);
     return;
   }
 
@@ -230,14 +230,22 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
 }
 
 
+const OLLAMA_IMAGE_GENERATION_CAPABILITY = 'image';
+const OLLAMA_IMAGE_INPUT_CAPABILITY = 'vision';
+
 interface ImageGenerationCapability {
   enabled: boolean;
+  provider: 'ollama';
   currentModel: string | null;
   installed: boolean | null;
   loaded: boolean | null;
   available: boolean;
   endpoint: '/api/images/generate';
   ollamaEndpoint: '/api/generate';
+  requiredCapability: 'image';
+  modelCapabilities: string[];
+  supportsImageGeneration: boolean | null;
+  supportsImageInput: boolean | null;
   maxPromptChars: number;
   reason?: string;
 }
@@ -255,7 +263,9 @@ async function handleCapabilities(
     ok: true,
     textGeneration: false,
     textStreaming: false,
-    imageGeneration
+    imageInput: imageGeneration.supportsImageInput === true,
+    imageGeneration,
+    modelCapabilities: buildModelCapabilityReport(imageGeneration)
   });
 }
 
@@ -266,11 +276,16 @@ async function resolveImageGenerationCapability(
   logger: Logger
 ): Promise<ImageGenerationCapability> {
   const currentModel = await resolveCurrentModel(configStore);
-  const baseCapability = {
+  const baseCapability: Omit<ImageGenerationCapability, 'installed' | 'loaded' | 'available' | 'reason'> = {
     enabled: runtimeConfig.imageGenerationEnabled,
+    provider: 'ollama',
     currentModel,
-    endpoint: '/api/images/generate' as const,
-    ollamaEndpoint: '/api/generate' as const,
+    endpoint: '/api/images/generate',
+    ollamaEndpoint: '/api/generate',
+    requiredCapability: OLLAMA_IMAGE_GENERATION_CAPABILITY,
+    modelCapabilities: [],
+    supportsImageGeneration: null,
+    supportsImageInput: null,
     maxPromptChars: runtimeConfig.imageGenerationMaxPromptChars
   };
 
@@ -280,7 +295,7 @@ async function resolveImageGenerationCapability(
       installed: null,
       loaded: null,
       available: false,
-      reason: 'Image generation is disabled. Set IMAGE_GENERATION_ENABLED=true to enable it for the current model.'
+      reason: 'Image generation is disabled. Set IMAGE_GENERATION_ENABLED=true to enable it for an image-generation-capable provider/model.'
     };
   }
 
@@ -294,20 +309,13 @@ async function resolveImageGenerationCapability(
     };
   }
 
+  let installedModels;
+  let runningModels;
   try {
-    const [installedModels, runningModels] = await Promise.all([
+    [installedModels, runningModels] = await Promise.all([
       ollamaClient.listInstalledModels(),
       safeListRunningModels(ollamaClient, logger)
     ]);
-    const installed = modelListIncludes(installedModels, currentModel);
-    const loaded = isDefaultModelLoaded(currentModel, runningModels);
-    return {
-      ...baseCapability,
-      installed,
-      loaded,
-      available: installed,
-      ...(installed ? {} : { reason: `Current model ${currentModel} is not installed in Ollama.` })
-    };
   } catch (error: unknown) {
     logger.warn({ err: error, model: currentModel }, 'Unable to verify current model for image generation');
     return {
@@ -318,6 +326,121 @@ async function resolveImageGenerationCapability(
       reason: 'Unable to verify installed Ollama models for image generation.'
     };
   }
+
+  const installed = modelListIncludes(installedModels, currentModel);
+  const loaded = isDefaultModelLoaded(currentModel, runningModels);
+
+  if (!installed) {
+    return {
+      ...baseCapability,
+      installed,
+      loaded,
+      available: false,
+      reason: `Current model ${currentModel} is not installed in Ollama.`
+    };
+  }
+
+  try {
+    const modelInfo = await ollamaClient.showModel(currentModel);
+    const modelCapabilities = normalizeCapabilityList(modelInfo.capabilities);
+    const supportsImageGeneration = capabilityListIncludes(modelCapabilities, OLLAMA_IMAGE_GENERATION_CAPABILITY);
+    const supportsImageInput = capabilityListIncludes(modelCapabilities, OLLAMA_IMAGE_INPUT_CAPABILITY);
+
+    return {
+      ...baseCapability,
+      installed,
+      loaded,
+      modelCapabilities,
+      supportsImageGeneration,
+      supportsImageInput,
+      available: supportsImageGeneration,
+      ...(supportsImageGeneration ? {} : { reason: unsupportedImageGenerationReason(currentModel, modelCapabilities, supportsImageInput) })
+    };
+  } catch (error: unknown) {
+    logger.warn({ err: error, model: currentModel }, 'Unable to verify Ollama model capabilities for image generation');
+    return {
+      ...baseCapability,
+      installed,
+      loaded,
+      available: false,
+      reason: 'Unable to verify Ollama model capabilities. Image generation will not be routed to Ollama until the selected model reports capability "image".'
+    };
+  }
+}
+
+function buildModelCapabilityReport(imageGeneration: ImageGenerationCapability) {
+  const supportsTextGeneration = capabilityListIncludes(imageGeneration.modelCapabilities, 'completion');
+  const supportsImageInput = imageGeneration.supportsImageInput === true;
+
+  return {
+    provider: imageGeneration.provider,
+    currentModel: imageGeneration.currentModel,
+    installed: imageGeneration.installed,
+    loaded: imageGeneration.loaded,
+    ollamaCapabilities: imageGeneration.modelCapabilities,
+    textGeneration: {
+      available: supportsTextGeneration,
+      exposedByService: false,
+      providerEndpoint: '/api/generate'
+    },
+    chatCompletion: {
+      available: supportsTextGeneration,
+      exposedByService: false,
+      providerEndpoint: '/api/chat'
+    },
+    textStreaming: {
+      available: supportsTextGeneration,
+      exposedByService: false,
+      providerEndpoint: '/api/generate'
+    },
+    imageInput: {
+      available: supportsImageInput,
+      exposedByService: false,
+      providerEndpoint: '/api/chat',
+      note: 'Vision/image input is a separate capability from image-generation output.'
+    },
+    imageGeneration: {
+      available: imageGeneration.available,
+      exposedByService: true,
+      serviceEndpoint: imageGeneration.endpoint,
+      providerEndpoint: imageGeneration.ollamaEndpoint,
+      requiredCapability: imageGeneration.requiredCapability,
+      reason: imageGeneration.reason
+    }
+  };
+}
+
+function normalizeCapabilityList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function capabilityListIncludes(capabilities: string[], capability: string): boolean {
+  const normalizedCapability = capability.toLowerCase();
+  return capabilities.some((item) => item.toLowerCase() === normalizedCapability);
+}
+
+function unsupportedImageGenerationReason(model: string, capabilities: string[], supportsImageInput: boolean): string {
+  const reported = capabilities.length > 0
+    ? ` Reported Ollama capabilities: ${capabilities.join(', ')}.`
+    : ' No Ollama capabilities were reported for the selected model.';
+  const imageInputNote = supportsImageInput
+    ? ' The model supports image input/vision, but vision is not image-generation output.'
+    : '';
+
+  return `Current model ${model} does not report Ollama image-generation capability "image".${reported}${imageInputNote} Select an Ollama image-generation model or configure a separate image-generation provider.`;
 }
 
 async function handleImageGeneration(
@@ -325,7 +448,8 @@ async function handleImageGeneration(
   response: ServerResponse,
   configStore: ConfigStore,
   ollamaClient: OllamaClientLike,
-  runtimeConfig: RuntimeConfig
+  runtimeConfig: RuntimeConfig,
+  logger: Logger
 ): Promise<void> {
   const body = await readJsonBody(request);
   const prompt = readBodyString(body, 'prompt');
@@ -375,20 +499,58 @@ async function handleImageGeneration(
     return;
   }
 
-  let installedModels;
-  try {
-    installedModels = await ollamaClient.listInstalledModels();
-  } catch (error: unknown) {
-    sendJson(response, statusCodeForError(error, 503), toErrorPayload(error, 'OLLAMA_MODEL_DISCOVERY_FAILED'));
-    return;
-  }
+  const imageGenerationCapability = await resolveImageGenerationCapability(configStore, ollamaClient, runtimeConfig, logger);
 
-  if (!modelListIncludes(installedModels, currentModel)) {
+  if (imageGenerationCapability.installed === false) {
     sendJson(response, 404, {
       ok: false,
       error: {
         code: 'IMAGE_MODEL_NOT_INSTALLED',
-        message: `Current model ${currentModel} is not installed in Ollama.`
+        message: imageGenerationCapability.reason ?? `Current model ${currentModel} is not installed in Ollama.`,
+        details: {
+          provider: 'ollama',
+          model: currentModel,
+          requiredCapability: imageGenerationCapability.requiredCapability,
+          reportedCapabilities: imageGenerationCapability.modelCapabilities
+        }
+      }
+    });
+    return;
+  }
+
+  if (imageGenerationCapability.supportsImageGeneration === false) {
+    sendJson(response, 422, {
+      ok: false,
+      error: {
+        code: 'IMAGE_GENERATION_UNSUPPORTED_MODEL',
+        message: imageGenerationCapability.reason ?? `Current model ${currentModel} does not support image generation through Ollama.`,
+        details: {
+          provider: 'ollama',
+          model: currentModel,
+          requiredCapability: imageGenerationCapability.requiredCapability,
+          reportedCapabilities: imageGenerationCapability.modelCapabilities,
+          supportsImageInput: imageGenerationCapability.supportsImageInput,
+          supportsImageGeneration: imageGenerationCapability.supportsImageGeneration,
+          endpoint: imageGenerationCapability.endpoint,
+          ollamaEndpoint: imageGenerationCapability.ollamaEndpoint
+        }
+      }
+    });
+    return;
+  }
+
+  if (!imageGenerationCapability.available) {
+    sendJson(response, 503, {
+      ok: false,
+      error: {
+        code: 'IMAGE_MODEL_CAPABILITY_UNVERIFIED',
+        message: imageGenerationCapability.reason ?? 'Unable to verify that the selected model supports image generation through Ollama.',
+        details: {
+          provider: 'ollama',
+          model: currentModel,
+          requiredCapability: imageGenerationCapability.requiredCapability,
+          reportedCapabilities: imageGenerationCapability.modelCapabilities
+        }
       }
     });
     return;

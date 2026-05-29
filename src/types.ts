@@ -48,6 +48,15 @@ export interface OllamaInstalledModel {
   size?: number;
   digest?: string;
   details?: OllamaModelDetails;
+  capabilities?: string[];
+  [key: string]: unknown;
+}
+
+export interface OllamaModelInformation {
+  details?: OllamaModelDetails;
+  capabilities?: string[];
+  model_info?: Record<string, unknown>;
+  modelInfo?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -113,6 +122,7 @@ export interface OllamaClientLike {
   getVersion(): Promise<string | null>;
   listRunningModels(): Promise<OllamaRunningModel[]>;
   listInstalledModels(): Promise<OllamaInstalledModel[]>;
+  showModel(model: string): Promise<OllamaModelInformation>;
   prewarmModel(model: string, keepAlive: string | number, timeoutMs?: number): Promise<PrewarmResult>;
   generateImage(request: OllamaImageGenerateRequest): Promise<OllamaImageGenerateResult>;
 }

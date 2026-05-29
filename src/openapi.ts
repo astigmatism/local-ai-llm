@@ -75,7 +75,8 @@ const installedModelSchema = {
     modified_at: { type: 'string' },
     size: { type: 'number' },
     digest: { type: 'string' },
-    details: modelDetailsSchema
+    details: modelDetailsSchema,
+    capabilities: { type: 'array', items: { type: 'string' } }
   }
 } as const;
 
@@ -127,19 +128,82 @@ const generatedImageSchema = {
 
 const imageGenerationCapabilitySchema = {
   type: 'object',
-  required: ['enabled', 'currentModel', 'installed', 'loaded', 'available', 'endpoint', 'ollamaEndpoint', 'maxPromptChars'],
+  required: [
+    'enabled',
+    'provider',
+    'currentModel',
+    'installed',
+    'loaded',
+    'available',
+    'endpoint',
+    'ollamaEndpoint',
+    'requiredCapability',
+    'modelCapabilities',
+    'supportsImageGeneration',
+    'supportsImageInput',
+    'maxPromptChars'
+  ],
   properties: {
     enabled: { type: 'boolean' },
+    provider: { const: 'ollama' },
     currentModel: { ...nullableString, description: 'Model currently selected by local-ai-llm for generation.' },
     installed: { ...nullableBoolean, description: 'Whether the current model is installed, or null when disabled/unverified.' },
     loaded: { ...nullableBoolean, description: 'Whether the current model appears in Ollama running-model state, or null when disabled/unverified.' },
-    available: { type: 'boolean' },
+    available: { type: 'boolean', description: 'True only when image generation is enabled, the model is installed, and Ollama reports the image-generation capability.' },
     endpoint: { const: '/api/images/generate' },
     ollamaEndpoint: { const: '/api/generate' },
+    requiredCapability: { const: 'image' },
+    modelCapabilities: { type: 'array', items: { type: 'string' }, description: 'Raw capability names reported by Ollama POST /api/show.' },
+    supportsImageGeneration: { ...nullableBoolean, description: 'True when Ollama reports capability "image" for the selected model.' },
+    supportsImageInput: { ...nullableBoolean, description: 'True when Ollama reports capability "vision". This is input understanding, not image output.' },
     maxPromptChars: { type: 'number' },
     reason: { type: 'string' }
   }
 } as const;
+
+const capabilityAvailabilitySchema = {
+  type: 'object',
+  required: ['available', 'exposedByService'],
+  additionalProperties: true,
+  properties: {
+    available: { type: 'boolean' },
+    exposedByService: { type: 'boolean' },
+    providerEndpoint: { type: 'string' },
+    serviceEndpoint: { type: 'string' },
+    requiredCapability: { type: 'string' },
+    reason: { type: 'string' },
+    note: { type: 'string' }
+  }
+} as const;
+
+const modelCapabilityReportSchema = {
+  type: 'object',
+  required: [
+    'provider',
+    'currentModel',
+    'installed',
+    'loaded',
+    'ollamaCapabilities',
+    'textGeneration',
+    'chatCompletion',
+    'textStreaming',
+    'imageInput',
+    'imageGeneration'
+  ],
+  properties: {
+    provider: { const: 'ollama' },
+    currentModel: nullableString,
+    installed: nullableBoolean,
+    loaded: nullableBoolean,
+    ollamaCapabilities: { type: 'array', items: { type: 'string' } },
+    textGeneration: capabilityAvailabilitySchema,
+    chatCompletion: capabilityAvailabilitySchema,
+    textStreaming: capabilityAvailabilitySchema,
+    imageInput: capabilityAvailabilitySchema,
+    imageGeneration: capabilityAvailabilitySchema
+  }
+} as const;
+
 
 const legacyGpuSchema = {
   type: 'object',
@@ -211,7 +275,7 @@ export function buildOpenApiDocument() {
       '/api/capabilities': {
         get: {
           summary: 'Service capability report',
-          description: 'Reports whether image generation is enabled and backed by the current installed Ollama model.',
+          description: 'Reports provider/model capabilities separately from service-exposed endpoints. Vision/image input and image-generation output are separate capabilities.',
           responses: {
             '200': {
               description: 'Capability report',
@@ -219,12 +283,14 @@ export function buildOpenApiDocument() {
                 'application/json': {
                   schema: {
                     type: 'object',
-                    required: ['ok', 'textGeneration', 'textStreaming', 'imageGeneration'],
+                    required: ['ok', 'textGeneration', 'textStreaming', 'imageInput', 'imageGeneration', 'modelCapabilities'],
                     properties: {
                       ok: { const: true },
-                      textGeneration: { type: 'boolean' },
-                      textStreaming: { type: 'boolean' },
-                      imageGeneration: imageGenerationCapabilitySchema
+                      textGeneration: { type: 'boolean', description: 'Compatibility field for this service API. Detailed provider capability is in modelCapabilities.textGeneration.' },
+                      textStreaming: { type: 'boolean', description: 'Compatibility field for this service API. Detailed provider capability is in modelCapabilities.textStreaming.' },
+                      imageInput: { type: 'boolean', description: 'Whether the selected Ollama model reports vision/image-input support.' },
+                      imageGeneration: imageGenerationCapabilitySchema,
+                      modelCapabilities: modelCapabilityReportSchema
                     }
                   }
                 }
@@ -236,7 +302,7 @@ export function buildOpenApiDocument() {
       '/api/images/generate': {
         post: {
           summary: 'Generate an image with the current Ollama model',
-          description: 'Private orchestrator-facing endpoint. It calls Ollama POST /api/generate with stream=false using the current local-ai-llm model.',
+          description: 'Private orchestrator-facing endpoint. It calls Ollama POST /api/generate with stream=false only when the current model reports Ollama image-generation capability "image".',
           requestBody: {
             required: true,
             content: {
@@ -279,9 +345,9 @@ export function buildOpenApiDocument() {
               }
             },
             '400': { description: 'Unsupported model override', content: { 'application/json': { schema: errorSchema } } },
-            '404': { description: 'Current image model is not installed', content: { 'application/json': { schema: errorSchema } } },
-            '422': { description: 'Validation error', content: { 'application/json': { schema: validationErrorSchema } } },
-            '502': { description: 'Ollama returned no valid image data', content: { 'application/json': { schema: errorSchema } } },
+            '404': { description: 'Current/default model is not installed', content: { 'application/json': { schema: errorSchema } } },
+            '422': { description: 'Validation error or unsupported image-generation capability', content: { 'application/json': { schema: { oneOf: [validationErrorSchema, errorSchema] } } } },
+            '502': { description: 'Ollama returned no valid image data after capability gating', content: { 'application/json': { schema: errorSchema } } },
             '503': { description: 'Image generation disabled, no current model, or Ollama unavailable', content: { 'application/json': { schema: errorSchema } } }
           }
         }
@@ -424,7 +490,8 @@ export function buildOpenApiDocument() {
         GpuTelemetry: gpuSchema,
         LegacyGpuTelemetry: legacyGpuSchema,
         GeneratedImage: generatedImageSchema,
-        ImageGenerationCapability: imageGenerationCapabilitySchema
+        ImageGenerationCapability: imageGenerationCapabilitySchema,
+        ModelCapabilityReport: modelCapabilityReportSchema
       }
     }
   };

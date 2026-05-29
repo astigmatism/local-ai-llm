@@ -21,6 +21,27 @@ test('OllamaClient lists running models through /api/ps', async () => {
   }
 });
 
+test('OllamaClient reads model capabilities through /api/show', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<[string, RequestInit]> = [];
+
+  globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push([String(url), init ?? {}]);
+    return new Response(JSON.stringify({ capabilities: ['completion', 'vision'] }), { status: 200 });
+  };
+
+  try {
+    const client = new OllamaClient('http://ollama.test', 1000);
+    const info = await client.showModel('qwen3.6:35b-a3b-q4_K_M');
+    assert.deepEqual(info.capabilities, ['completion', 'vision']);
+    assert.equal(calls[0]?.[0], 'http://ollama.test/api/show');
+    assert.equal(calls[0]?.[1].method, 'POST');
+    assert.deepEqual(JSON.parse(String(calls[0]?.[1].body)), { model: 'qwen3.6:35b-a3b-q4_K_M' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('OllamaClient pre-warms model with stream false and keep_alive', async () => {
   const originalFetch = globalThis.fetch;
   const bodies: unknown[] = [];

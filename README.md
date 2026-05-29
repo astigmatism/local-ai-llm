@@ -91,13 +91,15 @@ IMAGE_GENERATION_TIMEOUT_MS=600000
 IMAGE_GENERATION_MAX_PROMPT_CHARS=4000
 ```
 
-The capability endpoint reports whether image generation is enabled and whether the current/default model appears in Ollama's installed-model list:
+The capability endpoint reports the selected model's provider capabilities separately from the service endpoints. Image input/vision (`vision`) and image generation output (`image`) are intentionally separate. A model must be installed and report Ollama capability `image` from `POST /api/show` before this service will route image-generation requests to Ollama:
 
 ```bash
 curl http://127.0.0.1:8000/api/capabilities
 ```
 
-When available, the private image endpoint accepts a prompt and optional experimental size/step parameters and calls Ollama `POST /api/generate` with `stream:false` using the current/default model:
+For example, a vision model can support image understanding while still returning `imageGeneration.available=false` because it does not generate image bytes/base64. In that case, `POST /api/images/generate` returns `IMAGE_GENERATION_UNSUPPORTED_MODEL` and includes the reported Ollama capabilities in `error.details`.
+
+When available, the private image endpoint accepts a prompt and optional experimental size/step parameters and calls Ollama `POST /api/generate` with `stream:false` using the current/default image-generation-capable model:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/images/generate \
@@ -105,7 +107,7 @@ curl -X POST http://127.0.0.1:8000/api/images/generate \
   -d '{"prompt":"A bear castle at sunset","options":{"width":1024,"height":1024,"steps":30}}'
 ```
 
-The response returns base64 image data and metadata to the Bear Castle AI gateway. This service does not store generated files; the gateway is responsible for authenticated conversation persistence and image serving. If no current/default model is selected, the model is not installed, or Ollama returns no image data, the endpoint returns a clear error instead of falling back to text generation.
+The response returns base64 image data and metadata to the Bear Castle AI gateway. This service does not store generated files; the gateway is responsible for authenticated conversation persistence and image serving. If no current/default model is selected, the model is not installed, the selected model lacks capability `image`, or Ollama returns no image data after capability gating, the endpoint returns a clear structured error instead of falling back to text generation.
 
 ## Legacy API compatibility
 

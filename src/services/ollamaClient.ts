@@ -5,6 +5,7 @@ import type {
   OllamaImageGenerateRequest,
   OllamaImageGenerateResult,
   OllamaInstalledModel,
+  OllamaModelInformation,
   OllamaRunningModel,
   PrewarmResult
 } from '../types.ts';
@@ -20,6 +21,8 @@ interface OllamaPsResponse {
 interface OllamaVersionResponse {
   version?: string;
 }
+
+interface OllamaShowResponse extends OllamaModelInformation {}
 
 const allowedImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
@@ -52,6 +55,14 @@ export class OllamaClient implements OllamaClientLike {
   async listInstalledModels(): Promise<OllamaInstalledModel[]> {
     const response = await this.request<OllamaTagsResponse>('/api/tags', { method: 'GET' });
     return Array.isArray(response.models) ? response.models : [];
+  }
+
+  async showModel(model: string): Promise<OllamaModelInformation> {
+    return this.request<OllamaShowResponse>('/api/show', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
   }
 
   async prewarmModel(model: string, keepAlive: string | number, timeoutMs = this.defaultTimeoutMs): Promise<PrewarmResult> {
@@ -160,7 +171,7 @@ export function parseOllamaImageGenerationResponse(body: unknown, requestedModel
 
   const images = extractImages(finalRecord);
   if (images.length === 0) {
-    throw new AppError('OLLAMA_IMAGE_NOT_RETURNED', 'Ollama did not return image data. Confirm the current model supports image generation.', 502, {
+    throw new AppError('OLLAMA_IMAGE_NOT_RETURNED', 'Ollama completed the image-generation request without image data. Verify the selected Ollama model reports capability "image" and that this Ollama version supports image generation.', 502, {
       model: requestedModel,
       done: finalRecord.done,
       done_reason: finalRecord.done_reason

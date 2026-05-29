@@ -25,6 +25,33 @@ test('GET /api/capabilities reports image generation disabled by default', async
   });
 });
 
+test('GET /api/capabilities distinguishes vision input from image generation output', async () => {
+  const visionModel = 'qwen3.6:35b-a3b-q4_K_M';
+  const installedVisionModel = { name: visionModel, model: visionModel };
+
+  await withTestServer({
+    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true }),
+    configStore: await tempConfigStore(visionModel),
+    ollamaClient: mockOllama([], [installedVisionModel], undefined, undefined, {
+      capabilities: ['completion', 'vision', 'tools', 'thinking']
+    }),
+    gpuService: mockGpuService()
+  }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/capabilities`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.imageGeneration.available, false);
+    assert.equal(body.imageGeneration.supportsImageGeneration, false);
+    assert.equal(body.imageGeneration.supportsImageInput, true);
+    assert.deepEqual(body.imageGeneration.modelCapabilities, ['completion', 'vision', 'tools', 'thinking']);
+    assert.match(body.imageGeneration.reason, /does not report Ollama image-generation capability "image"/);
+    assert.match(body.imageGeneration.reason, /vision is not image-generation output/);
+    assert.equal(body.modelCapabilities.imageInput.available, true);
+    assert.equal(body.modelCapabilities.imageGeneration.available, false);
+  });
+});
+
 test('POST /api/images/generate returns a disabled error when disabled', async () => {
   await withTestServer({
     runtimeConfig: testRuntimeConfig(),
@@ -62,6 +89,36 @@ test('POST /api/images/generate requires the current model to be installed', asy
   });
 });
 
+test('POST /api/images/generate rejects installed models without the Ollama image capability', async () => {
+  const visionModel = 'qwen3.6:35b-a3b-q4_K_M';
+  const installedVisionModel = { name: visionModel, model: visionModel };
+  let generateCalled = false;
+
+  await withTestServer({
+    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true }),
+    configStore: await tempConfigStore(visionModel),
+    ollamaClient: mockOllama([], [installedVisionModel], undefined, () => {
+      generateCalled = true;
+    }, { capabilities: ['completion', 'vision', 'tools', 'thinking'] }),
+    gpuService: mockGpuService()
+  }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/images/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'a bear castle at sunset' })
+    });
+    assert.equal(response.status, 422);
+    const body = await response.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.error.code, 'IMAGE_GENERATION_UNSUPPORTED_MODEL');
+    assert.match(body.error.message, /does not report Ollama image-generation capability "image"/);
+    assert.equal(body.error.details.supportsImageInput, true);
+    assert.deepEqual(body.error.details.reportedCapabilities, ['completion', 'vision', 'tools', 'thinking']);
+  });
+
+  assert.equal(generateCalled, false);
+});
+
 test('POST /api/images/generate uses the current Ollama model and returns base64 image data', async () => {
   let observedRequest: OllamaImageGenerateRequest | null = null;
 
@@ -70,7 +127,7 @@ test('POST /api/images/generate uses the current Ollama model and returns base64
     configStore: await tempConfigStore(imageModel),
     ollamaClient: mockOllama([], [installedImageModel], undefined, (request) => {
       observedRequest = request;
-    }),
+    }, { capabilities: ['image'] }),
     gpuService: mockGpuService()
   }, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/images/generate`, {
