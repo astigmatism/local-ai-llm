@@ -31,7 +31,7 @@ https://github.com/astigmatism/local-ai-llm
 - NVIDIA multi-GPU telemetry through a fixed `nvidia-smi --query-gpu` command.
 - Deployment/update and source-compression scripts.
 - Tests that run without real GPUs or Ollama.
-- Optional image-generation API for configured Ollama image-generation-capable models.
+- Optional image-generation API that uses the current/default Ollama model when it supports image generation.
 
 ## Quick start for development
 
@@ -75,29 +75,29 @@ CONFIG_PATH=./config/local-ai-llm.json
 DEFAULT_MODEL=qwen3:14b
 PREWARM_DEFAULT_MODEL_ON_START=true
 IMAGE_GENERATION_ENABLED=false
-IMAGE_GENERATION_MODEL=
+IMAGE_GENERATION_TIMEOUT_MS=600000
+IMAGE_GENERATION_MAX_PROMPT_CHARS=4000
 ```
 
 `qwen3:14b` is an example only. Pull and configure a model that fits the host's GPUs and operating needs.
 
 ## Optional image generation
 
-Image generation is disabled by default because not every Ollama model can generate images. To enable it, pull an Ollama model that explicitly supports image generation, then configure this service:
+Image generation is disabled by default because not every Ollama model can generate images. To enable it, pull an Ollama model that explicitly supports image generation, make it the current/default model through this service, then enable the image-generation endpoint:
 
 ```env
 IMAGE_GENERATION_ENABLED=true
-IMAGE_GENERATION_MODEL=<pulled-image-generation-model>
 IMAGE_GENERATION_TIMEOUT_MS=600000
 IMAGE_GENERATION_MAX_PROMPT_CHARS=4000
 ```
 
-The capability endpoint reports whether image generation is configured and whether the configured model appears in Ollama's installed-model list:
+The capability endpoint reports whether image generation is enabled and whether the current/default model appears in Ollama's installed-model list:
 
 ```bash
 curl http://127.0.0.1:8000/api/capabilities
 ```
 
-When available, the private image endpoint accepts a prompt and optional experimental size/step parameters and calls Ollama `POST /api/generate` with `stream:false` using the configured image model:
+When available, the private image endpoint accepts a prompt and optional experimental size/step parameters and calls Ollama `POST /api/generate` with `stream:false` using the current/default model:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/images/generate \
@@ -105,7 +105,7 @@ curl -X POST http://127.0.0.1:8000/api/images/generate \
   -d '{"prompt":"A bear castle at sunset","options":{"width":1024,"height":1024,"steps":30}}'
 ```
 
-The response returns base64 image data and metadata to the Bear Castle AI gateway. This service does not store generated files; the gateway is responsible for authenticated conversation persistence and image serving. If the model is not configured, not installed, or Ollama returns no image data, the endpoint returns a clear error instead of falling back to text generation.
+The response returns base64 image data and metadata to the Bear Castle AI gateway. This service does not store generated files; the gateway is responsible for authenticated conversation persistence and image serving. If no current/default model is selected, the model is not installed, or Ollama returns no image data, the endpoint returns a clear error instead of falling back to text generation.
 
 ## Legacy API compatibility
 

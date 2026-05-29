@@ -73,12 +73,12 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
   }
 
   if (method === 'GET' && pathName === '/api/capabilities') {
-    await handleCapabilities(response, ollamaClient, runtimeConfig, logger);
+    await handleCapabilities(response, configStore, ollamaClient, runtimeConfig, logger);
     return;
   }
 
   if (method === 'POST' && pathName === '/api/images/generate') {
-    await handleImageGeneration(request, response, ollamaClient, runtimeConfig);
+    await handleImageGeneration(request, response, configStore, ollamaClient, runtimeConfig);
     return;
   }
 
@@ -232,8 +232,9 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
 
 interface ImageGenerationCapability {
   enabled: boolean;
-  configuredModel: string | null;
+  currentModel: string | null;
   installed: boolean | null;
+  loaded: boolean | null;
   available: boolean;
   endpoint: '/api/images/generate';
   ollamaEndpoint: '/api/generate';
@@ -241,8 +242,14 @@ interface ImageGenerationCapability {
   reason?: string;
 }
 
-async function handleCapabilities(response: ServerResponse, ollamaClient: OllamaClientLike, runtimeConfig: RuntimeConfig, logger: Logger): Promise<void> {
-  const imageGeneration = await resolveImageGenerationCapability(ollamaClient, runtimeConfig, logger);
+async function handleCapabilities(
+  response: ServerResponse,
+  configStore: ConfigStore,
+  ollamaClient: OllamaClientLike,
+  runtimeConfig: RuntimeConfig,
+  logger: Logger
+): Promise<void> {
+  const imageGeneration = await resolveImageGenerationCapability(configStore, ollamaClient, runtimeConfig, logger);
 
   sendJson(response, 200, {
     ok: true,
@@ -253,14 +260,15 @@ async function handleCapabilities(response: ServerResponse, ollamaClient: Ollama
 }
 
 async function resolveImageGenerationCapability(
+  configStore: ConfigStore,
   ollamaClient: OllamaClientLike,
   runtimeConfig: RuntimeConfig,
   logger: Logger
 ): Promise<ImageGenerationCapability> {
-  const configuredModel = runtimeConfig.imageGenerationModel;
+  const currentModel = await resolveCurrentModel(configStore);
   const baseCapability = {
     enabled: runtimeConfig.imageGenerationEnabled,
-    configuredModel,
+    currentModel,
     endpoint: '/api/images/generate' as const,
     ollamaEndpoint: '/api/generate' as const,
     maxPromptChars: runtimeConfig.imageGenerationMaxPromptChars
@@ -270,34 +278,42 @@ async function resolveImageGenerationCapability(
     return {
       ...baseCapability,
       installed: null,
+      loaded: null,
       available: false,
-      reason: 'Image generation is disabled. Set IMAGE_GENERATION_ENABLED=true to enable it.'
+      reason: 'Image generation is disabled. Set IMAGE_GENERATION_ENABLED=true to enable it for the current model.'
     };
   }
 
-  if (!configuredModel) {
+  if (!currentModel) {
     return {
       ...baseCapability,
       installed: null,
+      loaded: null,
       available: false,
-      reason: 'No image-generation model is configured. Set IMAGE_GENERATION_MODEL to an installed Ollama image model.'
+      reason: 'No current model is selected. Load or set a default model before generating images.'
     };
   }
 
   try {
-    const installedModels = await ollamaClient.listInstalledModels();
-    const installed = modelListIncludes(installedModels, configuredModel);
+    const [installedModels, runningModels] = await Promise.all([
+      ollamaClient.listInstalledModels(),
+      safeListRunningModels(ollamaClient, logger)
+    ]);
+    const installed = modelListIncludes(installedModels, currentModel);
+    const loaded = isDefaultModelLoaded(currentModel, runningModels);
     return {
       ...baseCapability,
       installed,
+      loaded,
       available: installed,
-      ...(installed ? {} : { reason: `Configured image-generation model ${configuredModel} is not installed in Ollama.` })
+      ...(installed ? {} : { reason: `Current model ${currentModel} is not installed in Ollama.` })
     };
   } catch (error: unknown) {
-    logger.warn({ err: error, model: configuredModel }, 'Unable to verify configured image-generation model');
+    logger.warn({ err: error, model: currentModel }, 'Unable to verify current model for image generation');
     return {
       ...baseCapability,
       installed: null,
+      loaded: null,
       available: false,
       reason: 'Unable to verify installed Ollama models for image generation.'
     };
@@ -307,6 +323,7 @@ async function resolveImageGenerationCapability(
 async function handleImageGeneration(
   request: IncomingMessage,
   response: ServerResponse,
+  configStore: ConfigStore,
   ollamaClient: OllamaClientLike,
   runtimeConfig: RuntimeConfig
 ): Promise<void> {
@@ -318,18 +335,19 @@ async function handleImageGeneration(
       ok: false,
       error: {
         code: 'IMAGE_GENERATION_DISABLED',
-        message: 'Image generation is disabled on local-ai-llm. Set IMAGE_GENERATION_ENABLED=true and configure IMAGE_GENERATION_MODEL.'
+        message: 'Image generation is disabled on local-ai-llm. Set IMAGE_GENERATION_ENABLED=true to enable image generation with the current model.'
       }
     });
     return;
   }
 
-  if (!runtimeConfig.imageGenerationModel) {
+  const currentModel = await resolveCurrentModel(configStore);
+  if (!currentModel) {
     sendJson(response, 503, {
       ok: false,
       error: {
-        code: 'IMAGE_MODEL_NOT_CONFIGURED',
-        message: 'Image generation is not configured on local-ai-llm. Set IMAGE_GENERATION_MODEL to an installed Ollama image-generation model.'
+        code: 'IMAGE_MODEL_NOT_SELECTED',
+        message: 'Image generation requires a current model. Load or set a default model before generating images.'
       }
     });
     return;
@@ -346,12 +364,12 @@ async function handleImageGeneration(
   }
 
   const requestedModel = readBodyString(body, 'model');
-  if (requestedModel && requestedModel !== runtimeConfig.imageGenerationModel) {
+  if (requestedModel && requestedModel !== currentModel) {
     sendJson(response, 400, {
       ok: false,
       error: {
         code: 'IMAGE_MODEL_OVERRIDE_NOT_ALLOWED',
-        message: 'Image generation model overrides are not allowed unless they match the configured IMAGE_GENERATION_MODEL.'
+        message: 'Image generation model overrides are not allowed. The current loaded/default model is used for image generation.'
       }
     });
     return;
@@ -365,12 +383,12 @@ async function handleImageGeneration(
     return;
   }
 
-  if (!modelListIncludes(installedModels, runtimeConfig.imageGenerationModel)) {
+  if (!modelListIncludes(installedModels, currentModel)) {
     sendJson(response, 404, {
       ok: false,
       error: {
         code: 'IMAGE_MODEL_NOT_INSTALLED',
-        message: `Configured image-generation model ${runtimeConfig.imageGenerationModel} is not installed in Ollama.`
+        message: `Current model ${currentModel} is not installed in Ollama.`
       }
     });
     return;
@@ -386,7 +404,7 @@ async function handleImageGeneration(
 
   try {
     const result = await ollamaClient.generateImage({
-      model: runtimeConfig.imageGenerationModel,
+      model: currentModel,
       prompt,
       timeoutMs: runtimeConfig.imageGenerationTimeoutMs,
       signal: abortController.signal,
@@ -410,6 +428,12 @@ async function handleImageGeneration(
     request.off('aborted', abortImageGeneration);
     response.off('close', abortImageGeneration);
   }
+}
+
+async function resolveCurrentModel(configStore: ConfigStore): Promise<string | null> {
+  const config = await configStore.readConfig();
+  const currentModel = config.default_model.trim();
+  return currentModel === '' ? null : currentModel;
 }
 
 function readImageOptions(body: unknown): OllamaImageGenerateOptions {

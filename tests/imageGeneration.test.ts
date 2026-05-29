@@ -19,14 +19,16 @@ test('GET /api/capabilities reports image generation disabled by default', async
     assert.equal(body.ok, true);
     assert.equal(body.imageGeneration.available, false);
     assert.equal(body.imageGeneration.enabled, false);
+    assert.equal(body.imageGeneration.currentModel, 'qwen3:14b');
+    assert.equal(body.imageGeneration.loaded, null);
     assert.match(body.imageGeneration.reason, /disabled/i);
   });
 });
 
-test('POST /api/images/generate returns a configuration error when disabled', async () => {
+test('POST /api/images/generate returns a disabled error when disabled', async () => {
   await withTestServer({
-    runtimeConfig: testRuntimeConfig({ imageGenerationModel: imageModel }),
-    configStore: await tempConfigStore(),
+    runtimeConfig: testRuntimeConfig(),
+    configStore: await tempConfigStore(imageModel),
     ollamaClient: mockOllama([], [installedImageModel]),
     gpuService: mockGpuService()
   }, async (baseUrl) => {
@@ -42,10 +44,10 @@ test('POST /api/images/generate returns a configuration error when disabled', as
   });
 });
 
-test('POST /api/images/generate requires the configured model to be installed', async () => {
+test('POST /api/images/generate requires the current model to be installed', async () => {
   await withTestServer({
-    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true, imageGenerationModel: imageModel }),
-    configStore: await tempConfigStore(),
+    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true }),
+    configStore: await tempConfigStore(imageModel),
     ollamaClient: mockOllama([], [{ name: 'qwen3:14b', model: 'qwen3:14b' }]),
     gpuService: mockGpuService()
   }, async (baseUrl) => {
@@ -60,12 +62,12 @@ test('POST /api/images/generate requires the configured model to be installed', 
   });
 });
 
-test('POST /api/images/generate uses the configured Ollama image model and returns base64 image data', async () => {
+test('POST /api/images/generate uses the current Ollama model and returns base64 image data', async () => {
   let observedRequest: OllamaImageGenerateRequest | null = null;
 
   await withTestServer({
-    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true, imageGenerationModel: imageModel, imageGenerationTimeoutMs: 12345 }),
-    configStore: await tempConfigStore(),
+    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true, imageGenerationTimeoutMs: 12345 }),
+    configStore: await tempConfigStore(imageModel),
     ollamaClient: mockOllama([], [installedImageModel], undefined, (request) => {
       observedRequest = request;
     }),
@@ -95,8 +97,8 @@ test('POST /api/images/generate uses the configured Ollama image model and retur
 
 test('POST /api/images/generate rejects /model overrides that do not match configuration', async () => {
   await withTestServer({
-    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true, imageGenerationModel: imageModel }),
-    configStore: await tempConfigStore(),
+    runtimeConfig: testRuntimeConfig({ imageGenerationEnabled: true }),
+    configStore: await tempConfigStore(imageModel),
     ollamaClient: mockOllama([], [installedImageModel]),
     gpuService: mockGpuService()
   }, async (baseUrl) => {

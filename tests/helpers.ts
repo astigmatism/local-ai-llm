@@ -32,7 +32,6 @@ export function testRuntimeConfig(overrides: Partial<RuntimeConfig> = {}): Runti
     prewarmKeepAlive: -1,
     gpuQueryTimeoutMs: 1000,
     imageGenerationEnabled: false,
-    imageGenerationModel: null,
     imageGenerationTimeoutMs: 1000,
     imageGenerationMaxPromptChars: 4000,
     logLevel: 'silent',

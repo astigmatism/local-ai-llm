@@ -160,7 +160,7 @@ export function parseOllamaImageGenerationResponse(body: unknown, requestedModel
 
   const images = extractImages(finalRecord);
   if (images.length === 0) {
-    throw new AppError('OLLAMA_IMAGE_NOT_RETURNED', 'Ollama did not return image data. Confirm the configured model supports image generation.', 502, {
+    throw new AppError('OLLAMA_IMAGE_NOT_RETURNED', 'Ollama did not return image data. Confirm the current model supports image generation.', 502, {
       model: requestedModel,
       done: finalRecord.done,
       done_reason: finalRecord.done_reason

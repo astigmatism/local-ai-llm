@@ -9,7 +9,6 @@ export interface RuntimeConfig {
   prewarmTimeoutMs: number;
   prewarmKeepAlive: string | number;
   imageGenerationEnabled: boolean;
-  imageGenerationModel: string | null;
   imageGenerationTimeoutMs: number;
   imageGenerationMaxPromptChars: number;
   gpuQueryTimeoutMs: number;
