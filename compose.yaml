@@ -1,0 +1,129 @@
+name: ${LOCAL_AI_LLM_PROJECT_NAME:-local-ai-llm}
+
+services:
+  ollama:
+    container_name: ${LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME:-local-ai-llm-ollama}
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    restart: unless-stopped
+
+    labels:
+      local-ai.managed: "true"
+      local-ai.service.name: "local-ai-llm"
+      local-ai.service.component: "ollama"
+      local-ai.service.role: "model-runtime"
+      local-ai.gpu.slots.min: "1"
+      local-ai.gpu.slots.max: "4"
+      local-ai.gpu.slots.default: "1"
+      local-ai.gpu.assignment.env: "GPU_DEVICE_IDS"
+      local-ai.gpu.assignment.kind: "nvidia-gpu-uuid-list"
+      local-ai.gpu.assignment.input: "gpu-device-ids"
+      local-ai.gpu.slot.0.assignment.env: "GPU_SLOT_0"
+      local-ai.gpu.slot.1.assignment.env: "GPU_SLOT_1"
+      local-ai.gpu.slot.2.assignment.env: "GPU_SLOT_2"
+      local-ai.gpu.slot.3.assignment.env: "GPU_SLOT_3"
+      local-ai.model.provider: "ollama"
+      local-ai.model.default.env: "DEFAULT_MODEL"
+      local-ai.model.discovery.mode: "ollama-installed-and-local-gguf"
+      local-ai.model.ollama.storage.container_path: "/root/.ollama"
+      local-ai.model.ollama.storage.host_path: "${AI_ROOT:-/home/astigmatism/ai}/models/ollama"
+      local-ai.model.local_gguf.host_path: "${LLM_MODEL_DIR:-/home/astigmatism/ai/models/llm}"
+      local-ai.runtime.env_file: ".env"
+      local-ai.runtime.generated_compose_file: "compose.runtime.yaml"
+
+    env_file:
+      - path: ./.env
+        required: false
+
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: /root/.ollama/models
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+    expose:
+      - "11434"
+
+    volumes:
+      - ${AI_ROOT:-/home/astigmatism/ai}/models/ollama:/root/.ollama
+
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 10
+
+  app:
+    container_name: ${LOCAL_AI_LLM_APP_CONTAINER_NAME:-local-ai-llm}
+    image: ${LOCAL_AI_LLM_IMAGE:-local-ai-llm:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+
+    labels:
+      local-ai.managed: "true"
+      local-ai.service.name: "local-ai-llm"
+      local-ai.service.component: "app"
+      local-ai.service.role: "portal"
+      local-ai.gpu.slots: "0"
+      local-ai.gpu.telemetry.source: "nvidia-smi"
+      local-ai.gpu.telemetry.visible.env: "GPU_DEVICE_IDS"
+      local-ai.model.default.env: "DEFAULT_MODEL"
+      local-ai.model.provider.env: "OLLAMA_BASE_URL"
+      local-ai.model.provider.service: "ollama"
+      local-ai.web.bind_ip.env: "WEB_BIND_IP"
+      local-ai.web.port.env: "WEB_PORT"
+      local-ai.runtime.env_file: ".env"
+      local-ai.runtime.generated_compose_file: "compose.runtime.yaml"
+
+    env_file:
+      - path: ./.env
+        required: false
+
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8000
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_REQUEST_TIMEOUT_MS: ${OLLAMA_REQUEST_TIMEOUT_MS:-1200000}
+      CONFIG_PATH: /app/config/local-ai-llm.json
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen3:14b}
+      PREWARM_DEFAULT_MODEL_ON_START: ${PREWARM_DEFAULT_MODEL_ON_START:-false}
+      PREWARM_TIMEOUT_MS: ${PREWARM_TIMEOUT_MS:-900000}
+      PREWARM_KEEP_ALIVE: ${PREWARM_KEEP_ALIVE:--1}
+      IMAGE_GENERATION_ENABLED: ${IMAGE_GENERATION_ENABLED:-false}
+      IMAGE_GENERATION_TIMEOUT_MS: ${IMAGE_GENERATION_TIMEOUT_MS:-600000}
+      IMAGE_GENERATION_MAX_PROMPT_CHARS: ${IMAGE_GENERATION_MAX_PROMPT_CHARS:-4000}
+      GPU_QUERY_TIMEOUT_MS: ${GPU_QUERY_TIMEOUT_MS:-5000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+
+    ports:
+      - "${WEB_BIND_IP:-127.0.0.1}:${WEB_PORT:-8001}:8000"
+
+    volumes:
+      # Live-mounted app source. Normal source updates do not require rebuilding the image.
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./README.md:/app/README.md:ro
+
+      # Runtime/local state and shared host cache.
+      - ./config:/app/config
+      - ${AI_ROOT:-/home/astigmatism/ai}/cache/local-ai-llm:/cache
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
