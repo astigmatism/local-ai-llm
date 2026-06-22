@@ -11,11 +11,11 @@ PREWARM_WAIT_TIMEOUT_SECONDS="${PREWARM_WAIT_TIMEOUT_SECONDS:-900}"
 MAX_GPU_SLOTS="${MAX_GPU_SLOTS:-4}"
 
 log() {
-  printf '[local-ai-llm] %s\n' "$*"
+  printf '[local-ai-llm-legacy] %s\n' "$*"
 }
 
 fail() {
-  printf '[local-ai-llm] ERROR: %s\n' "$*" >&2
+  printf '[local-ai-llm-legacy] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -44,15 +44,15 @@ GPU assignment:
   UUIDs, and then pass those UUIDs to plan or deploy.
 
 Model argument:
-  Pass an Ollama model name, such as qwen3:14b, llama3.2:3b, or gemma3:12b.
+  Pass an Ollama model name, such as <ollama-model>, a valid Ollama model name with an optional tag.
   The script writes it as DEFAULT_MODEL and pulls it unless PULL_MODEL_ON_DEPLOY=false.
 
 Examples:
   ./deploy-runtime.sh list
-  ./deploy-runtime.sh plan --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --model qwen3:14b
-  ./deploy-runtime.sh deploy --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --model qwen3:14b
-  ./deploy-runtime.sh deploy --gpu-device-id GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --gpu-device-id GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --model qwen3:14b
-  ./deploy-runtime.sh GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa qwen3:14b
+  ./deploy-runtime.sh plan --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --model <ollama-model>
+  ./deploy-runtime.sh deploy --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --model <ollama-model>
+  ./deploy-runtime.sh deploy --gpu-device-id GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --gpu-device-id GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --model <ollama-model>
+  ./deploy-runtime.sh GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa <ollama-model>
 
 What deploy does:
   1. Validates requested GPU UUIDs against live host nvidia-smi inventory.
@@ -356,8 +356,8 @@ list_installed_models() {
   echo
   echo "Installed Ollama models for this Compose project:"
 
-  if [ -f compose.yaml ] && compose ps -q "$OLLAMA_SERVICE" >/tmp/local-ai-llm-ollama-container-id.txt 2>/dev/null \
-    && [ -s /tmp/local-ai-llm-ollama-container-id.txt ]; then
+  if [ -f compose.yaml ] && compose ps -q "$OLLAMA_SERVICE" >/tmp/local-ai-llm-legacy-ollama-container-id.txt 2>/dev/null \
+    && [ -s /tmp/local-ai-llm-legacy-ollama-container-id.txt ]; then
     if compose exec -T "$OLLAMA_SERVICE" ollama list 2>/dev/null; then
       return 0
     fi
@@ -383,10 +383,10 @@ write_env_file() {
     echo "# Do not edit GPU/model assignment here by hand; rerun deploy-runtime.sh."
     echo
 
-    printf 'LOCAL_AI_LLM_PROJECT_NAME=%s\n' "$(read_env_or_default LOCAL_AI_LLM_PROJECT_NAME local-ai-llm)"
-    printf 'LOCAL_AI_LLM_APP_CONTAINER_NAME=%s\n' "$(read_env_or_default LOCAL_AI_LLM_APP_CONTAINER_NAME local-ai-llm)"
-    printf 'LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME=%s\n' "$(read_env_or_default LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME local-ai-llm-ollama)"
-    printf 'LOCAL_AI_LLM_IMAGE=%s\n' "$(read_env_or_default LOCAL_AI_LLM_IMAGE local-ai-llm:local)"
+    printf 'LOCAL_AI_LLM_PROJECT_NAME=%s\n' "$(read_env_or_default LOCAL_AI_LLM_PROJECT_NAME local-ai-llm-legacy)"
+    printf 'LOCAL_AI_LLM_APP_CONTAINER_NAME=%s\n' "$(read_env_or_default LOCAL_AI_LLM_APP_CONTAINER_NAME local-ai-llm-legacy)"
+    printf 'LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME=%s\n' "$(read_env_or_default LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME local-ai-llm-legacy-ollama)"
+    printf 'LOCAL_AI_LLM_IMAGE=%s\n' "$(read_env_or_default LOCAL_AI_LLM_IMAGE local-ai-llm-legacy:local)"
     printf 'OLLAMA_IMAGE=%s\n' "$(read_env_or_default OLLAMA_IMAGE ollama/ollama:latest)"
     echo
 
@@ -474,13 +474,13 @@ ensure_runtime_dirs() {
 
   mkdir -p \
     "$ai_root/models/ollama" \
-    "$ai_root/cache/local-ai-llm" \
+    "$ai_root/cache/local-ai-llm-legacy" \
     "$llm_model_dir" \
     ./config
 }
 
 image_name() {
-  read_env_value LOCAL_AI_LLM_IMAGE .env 2>/dev/null || printf 'local-ai-llm:local\n'
+  read_env_value LOCAL_AI_LLM_IMAGE .env 2>/dev/null || printf 'local-ai-llm-legacy:local\n'
 }
 
 build_base_url() {
@@ -539,7 +539,7 @@ wait_for_http_health() {
   deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if curl -fsS "$health_url" >/tmp/local-ai-llm-health.json 2>/dev/null; then
+    if curl -fsS "$health_url" >/tmp/local-ai-llm-legacy-health.json 2>/dev/null; then
       return 0
     fi
     sleep 2
@@ -609,7 +609,7 @@ set_default_model() {
     -H 'Content-Type: application/json' \
     -X POST "$base_url/config" \
     -d "{\"default_model\":${model_json}}" \
-    >/tmp/local-ai-llm-config-response.json
+    >/tmp/local-ai-llm-legacy-config-response.json
 }
 
 prewarm_model_if_requested() {
@@ -632,7 +632,7 @@ prewarm_model_if_requested() {
       -H 'Content-Type: application/json' \
       -X POST "$base_url/model/prewarm" \
       -d "{\"model\":${model_json}}" \
-      >/tmp/local-ai-llm-prewarm-response.json 2>/tmp/local-ai-llm-prewarm-error.txt; then
+      >/tmp/local-ai-llm-legacy-prewarm-response.json 2>/tmp/local-ai-llm-legacy-prewarm-error.txt; then
       log "Model prewarm request completed"
       return 0
     fi
@@ -641,7 +641,7 @@ prewarm_model_if_requested() {
     sleep 5
   done
 
-  cat /tmp/local-ai-llm-prewarm-error.txt >&2 || true
+  cat /tmp/local-ai-llm-legacy-prewarm-error.txt >&2 || true
   fail "Model prewarm did not complete before timeout"
 }
 
@@ -662,7 +662,7 @@ print_plan() {
   done
 
   echo "Deployment plan:"
-  echo "  project:      $(read_env_or_default LOCAL_AI_LLM_PROJECT_NAME local-ai-llm)"
+  echo "  project:      $(read_env_or_default LOCAL_AI_LLM_PROJECT_NAME local-ai-llm-legacy)"
   echo "  app service:  $APP_SERVICE"
   echo "  model service:$OLLAMA_SERVICE"
   echo "  default model:$model"
@@ -782,7 +782,7 @@ log "Active runtime settings"
 grep -E '^(LOCAL_AI_LLM_PROJECT_NAME|LOCAL_AI_LLM_APP_CONTAINER_NAME|LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME|WEB_BIND_IP|WEB_PORT|GPU_SLOT_COUNT|GPU_SLOT_[0-3]|GPU_DEVICE_IDS|DEFAULT_MODEL|OLLAMA_IMAGE)=' .env || true
 
 log "Rendering Compose configuration"
-compose config >/tmp/local-ai-llm-compose.yml
+compose config >/tmp/local-ai-llm-legacy-compose.yml
 
 log "Starting Ollama service"
 compose up -d "$OLLAMA_SERVICE"

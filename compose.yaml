@@ -1,13 +1,14 @@
-name: ${LOCAL_AI_LLM_PROJECT_NAME:-local-ai-llm}
+name: ${LOCAL_AI_LLM_PROJECT_NAME:-local-ai-llm-legacy}
 
 services:
   ollama:
-    container_name: ${LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME:-local-ai-llm-ollama}
+    container_name: ${LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME:-local-ai-llm-legacy-ollama}
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     restart: unless-stopped
 
     labels:
       local-ai.managed: "true"
+      local-ai.deployment.name: "local-ai-llm-legacy"
       local-ai.service.name: "local-ai-llm"
       local-ai.service.component: "ollama"
       local-ai.service.role: "model-runtime"
@@ -56,8 +57,8 @@ services:
       retries: 10
 
   app:
-    container_name: ${LOCAL_AI_LLM_APP_CONTAINER_NAME:-local-ai-llm}
-    image: ${LOCAL_AI_LLM_IMAGE:-local-ai-llm:local}
+    container_name: ${LOCAL_AI_LLM_APP_CONTAINER_NAME:-local-ai-llm-legacy}
+    image: ${LOCAL_AI_LLM_IMAGE:-local-ai-llm-legacy:local}
     build:
       context: .
       dockerfile: Dockerfile
@@ -65,6 +66,7 @@ services:
 
     labels:
       local-ai.managed: "true"
+      local-ai.deployment.name: "local-ai-llm-legacy"
       local-ai.service.name: "local-ai-llm"
       local-ai.service.component: "app"
       local-ai.service.role: "portal"
@@ -90,7 +92,7 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_REQUEST_TIMEOUT_MS: ${OLLAMA_REQUEST_TIMEOUT_MS:-1200000}
       CONFIG_PATH: /app/config/local-ai-llm.json
-      DEFAULT_MODEL: ${DEFAULT_MODEL:-qwen3:14b}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-}
       PREWARM_DEFAULT_MODEL_ON_START: ${PREWARM_DEFAULT_MODEL_ON_START:-false}
       PREWARM_TIMEOUT_MS: ${PREWARM_TIMEOUT_MS:-900000}
       PREWARM_KEEP_ALIVE: ${PREWARM_KEEP_ALIVE:--1}
@@ -115,7 +117,7 @@ services:
 
       # Runtime/local state and shared host cache.
       - ./config:/app/config
-      - ${AI_ROOT:-/home/astigmatism/ai}/cache/local-ai-llm:/cache
+      - ${AI_ROOT:-/home/astigmatism/ai}/cache/local-ai-llm-legacy:/cache
 
     depends_on:
       ollama:
