@@ -23,6 +23,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   ./deploy-runtime.sh list
+  ./deploy-runtime.sh validate --gpu-device-ids <GPU-UUID[,GPU-UUID...]> [--model <ollama-model>]
   ./deploy-runtime.sh plan --gpu-device-ids <GPU-UUID[,GPU-UUID...]> --model <ollama-model>
   ./deploy-runtime.sh deploy --gpu-device-ids <GPU-UUID[,GPU-UUID...]> --model <ollama-model>
   ./deploy-runtime.sh <GPU-UUID[,GPU-UUID...]> <ollama-model>
@@ -49,6 +50,7 @@ Model argument:
 
 Examples:
   ./deploy-runtime.sh list
+  ./deploy-runtime.sh validate --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
   ./deploy-runtime.sh plan --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --model <ollama-model>
   ./deploy-runtime.sh deploy --gpu-device-ids GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --model <ollama-model>
   ./deploy-runtime.sh deploy --gpu-device-id GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --gpu-device-id GPU-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --model <ollama-model>
@@ -66,6 +68,14 @@ What deploy does:
   9. Recreates the Node portal container.
   10. Waits for health, sets the app default model, and optionally prewarms it.
   11. Prints service status, visible GPUs, installed models, and running models.
+
+What validate does:
+  1. Validates requested GPU UUIDs against live host nvidia-smi inventory.
+  2. Optionally validates an Ollama model name format if --model is supplied.
+  3. Renders temporary .env and compose.runtime preview files under /tmp.
+  4. Runs docker compose config with both Compose files.
+  5. Removes the temporary preview files before exit.
+  6. Makes no application filesystem, Docker container, image, model-pull, or API changes.
 
 What plan does:
   1. Validates requested GPU UUIDs against live host nvidia-smi inventory.
@@ -147,7 +157,7 @@ parse_mode_and_args() {
     list|help|-h|--help)
       return 0
       ;;
-    plan|deploy)
+    validate|plan|deploy)
       shift
       ;;
     *)
@@ -330,6 +340,10 @@ PY
 validate_model_name() {
   local model="$1"
 
+  if [ -z "$model" ]; then
+    fail "Model name is required"
+  fi
+
   if [[ ! "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]; then
     fail "Invalid Ollama model name: $model"
   fi
@@ -366,10 +380,11 @@ list_installed_models() {
   echo "  Ollama is not running yet for this project, or no model list is available."
 }
 
-write_env_file() {
-  local default_model="$1"
-  local ai_root="$2"
-  local llm_model_dir="$3"
+write_env_file_to() {
+  local output_file="$1"
+  local default_model="$2"
+  local ai_root="$3"
+  local llm_model_dir="$4"
   local tmp_file
   local gpu_csv
   local slot_value
@@ -435,10 +450,15 @@ write_env_file() {
     printf 'LOG_LEVEL=%s\n' "${LOG_LEVEL:-$(read_env_or_default LOG_LEVEL info)}"
   } > "$tmp_file"
 
-  mv "$tmp_file" .env
+  mv "$tmp_file" "$output_file"
 }
 
-write_runtime_compose_file() {
+write_env_file() {
+  write_env_file_to .env "$@"
+}
+
+write_runtime_compose_file_to() {
+  local output_file="$1"
   local gpu_csv
   local uuid
 
@@ -465,7 +485,11 @@ write_runtime_compose_file() {
       done
       echo "              capabilities: [gpu]"
     done
-  } > "$RUNTIME_COMPOSE_FILE"
+  } > "$output_file"
+}
+
+write_runtime_compose_file() {
+  write_runtime_compose_file_to "$RUNTIME_COMPOSE_FILE"
 }
 
 ensure_runtime_dirs() {
@@ -649,6 +673,8 @@ print_plan() {
   local model="$1"
   local ai_root="$2"
   local llm_model_dir="$3"
+  local heading="${4:-Deployment plan}"
+  local model_display
   local total_mib=0
   local largest_mib=0
   local memory
@@ -661,11 +687,17 @@ print_plan() {
     fi
   done
 
-  echo "Deployment plan:"
+  if [ -n "$model" ]; then
+    model_display="$model"
+  else
+    model_display="(not selected)"
+  fi
+
+  echo "$heading:"
   echo "  project:      $(read_env_or_default LOCAL_AI_LLM_PROJECT_NAME local-ai-llm-legacy)"
   echo "  app service:  $APP_SERVICE"
   echo "  model service:$OLLAMA_SERVICE"
-  echo "  default model:$model"
+  echo "  default model:$model_display"
   echo "  web bind:     ${WEB_BIND_IP:-$(read_env_or_default WEB_BIND_IP 192.168.1.21)}:${WEB_PORT:-$(read_env_or_default WEB_PORT 8001)}"
   echo "  AI_ROOT:      $ai_root"
   echo "  LLM_MODEL_DIR:$llm_model_dir"
@@ -676,6 +708,78 @@ print_plan() {
   done
   echo
   echo "Note: model fit is validated by pull/prewarm/runtime checks. This script does not assume remote Ollama model VRAM requirements before the model is installed."
+}
+
+print_rendered_compose_summary() {
+  local rendered_config="$1"
+
+  echo
+  echo "Rendered services:"
+  awk '
+    /^services:/ { in_services = 1; next }
+    /^[^[:space:]]/ { in_services = 0 }
+    in_services && /^  [A-Za-z0-9_-]+:/ { print }
+  ' "$rendered_config" || true
+
+  echo
+  echo "Rendered port bindings:"
+  grep -n -A6 'ports:' "$rendered_config" || true
+
+  echo
+  echo "Rendered model/prewarm environment:"
+  grep -n -E 'DEFAULT_MODEL|PREWARM_DEFAULT_MODEL_ON_START|OLLAMA_BASE_URL|OLLAMA_MODELS' "$rendered_config" || true
+
+  echo
+  echo "Rendered NVIDIA device reservations:"
+  grep -n -A10 'device_ids:' "$rendered_config" || true
+}
+
+run_validate_mode() {
+  local model="$1"
+  local ai_root="$2"
+  local llm_model_dir="$3"
+  local tmp_dir
+  local preview_env
+  local preview_compose
+  local rendered_config
+
+  tmp_dir="$(mktemp -d)"
+  preview_env="$tmp_dir/.env.preview"
+  preview_compose="$tmp_dir/compose.runtime.preview.yaml"
+  rendered_config="$tmp_dir/compose.rendered.yaml"
+
+  VALIDATE_TMP_DIR="$tmp_dir"
+  cleanup_validate_tmp() {
+    if [ -n "${VALIDATE_TMP_DIR:-}" ]; then
+      rm -rf "$VALIDATE_TMP_DIR"
+    fi
+  }
+  trap cleanup_validate_tmp EXIT
+
+  print_plan "$model" "$ai_root" "$llm_model_dir" "Validation plan"
+
+  log "Rendering temporary validation env: $preview_env"
+  write_env_file_to "$preview_env" "$model" "$ai_root" "$llm_model_dir"
+
+  log "Rendering temporary validation Compose overlay: $preview_compose"
+  write_runtime_compose_file_to "$preview_compose"
+
+  echo
+  echo "Preview runtime environment values:"
+  grep -E '^(LOCAL_AI_LLM_PROJECT_NAME|LOCAL_AI_LLM_APP_CONTAINER_NAME|LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME|WEB_BIND_IP|WEB_PORT|GPU_SLOT_COUNT|GPU_SLOT_[0-3]|GPU_DEVICE_IDS|DEFAULT_MODEL|OLLAMA_IMAGE|PREWARM_DEFAULT_MODEL_ON_START)=' "$preview_env" || true
+
+  log "Rendering Docker Compose configuration with temporary files"
+  docker compose \
+    --env-file "$preview_env" \
+    -f compose.yaml \
+    -f "$preview_compose" \
+    config > "$rendered_config"
+
+  log "Compose validation succeeded"
+  print_rendered_compose_summary "$rendered_config"
+
+  echo
+  echo "Validation complete. No .env file, compose.runtime.yaml, runtime directories, Docker images, containers, Ollama models, or app APIs were created or modified."
 }
 
 run_list_mode() {
@@ -721,7 +825,7 @@ if [ "${#GPU_DEVICE_ID_INPUTS[@]}" -lt 1 ]; then
   exit 2
 fi
 
-if [ -z "$MODEL" ]; then
+if [ "$MODE" != "validate" ] && [ -z "$MODEL" ]; then
   usage
   exit 2
 fi
@@ -732,11 +836,15 @@ log "Using Compose services: $OLLAMA_SERVICE, $APP_SERVICE"
 require_command docker
 require_command nvidia-smi
 require_command python3
-require_command curl
+if [ "$MODE" = "deploy" ]; then
+  require_command curl
+fi
 
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required: docker compose"
 
-validate_model_name "$MODEL"
+if [ -n "$MODEL" ]; then
+  validate_model_name "$MODEL"
+fi
 
 resolved_gpu_file="$(mktemp)"
 if ! validate_gpu_device_ids > "$resolved_gpu_file"; then
@@ -762,6 +870,11 @@ done
 
 ai_root="${AI_ROOT:-$(read_env_or_default AI_ROOT /home/astigmatism/ai)}"
 llm_model_dir="${LLM_MODEL_DIR:-$(read_env_or_default LLM_MODEL_DIR "$ai_root/models/llm")}"
+
+if [ "$MODE" = "validate" ]; then
+  run_validate_mode "$MODEL" "$ai_root" "$llm_model_dir"
+  exit 0
+fi
 
 print_plan "$MODEL" "$ai_root" "$llm_model_dir"
 
