@@ -89,6 +89,8 @@ Environment overrides:
   LLM_MODEL_DIR=/home/astigmatism/ai/models/llm
   WEB_BIND_IP=192.168.1.21
   WEB_PORT=8001
+  OLLAMA_BIND_IP=192.168.1.21
+  OLLAMA_PORT=11434
   MAX_GPU_SLOTS=4
   PULL_MODEL_ON_DEPLOY=true
   PREWARM_MODEL_ON_DEPLOY=true
@@ -388,9 +390,15 @@ write_env_file_to() {
   local tmp_file
   local gpu_csv
   local slot_value
+  local web_bind_ip
+  local ollama_bind_ip
+  local ollama_port
   local i
 
   gpu_csv="$(IFS=','; printf '%s' "${GPU_UUIDS[*]}")"
+  web_bind_ip="${WEB_BIND_IP:-$(read_env_or_default WEB_BIND_IP 192.168.1.21)}"
+  ollama_bind_ip="${OLLAMA_BIND_IP:-$(read_env_or_default OLLAMA_BIND_IP "$web_bind_ip")}"
+  ollama_port="${OLLAMA_PORT:-$(read_env_or_default OLLAMA_PORT 11434)}"
   tmp_file="$(mktemp)"
 
   {
@@ -407,8 +415,10 @@ write_env_file_to() {
 
     printf 'AI_ROOT=%s\n' "$ai_root"
     printf 'LLM_MODEL_DIR=%s\n' "$llm_model_dir"
-    printf 'WEB_BIND_IP=%s\n' "${WEB_BIND_IP:-$(read_env_or_default WEB_BIND_IP 192.168.1.21)}"
+    printf 'WEB_BIND_IP=%s\n' "$web_bind_ip"
     printf 'WEB_PORT=%s\n' "${WEB_PORT:-$(read_env_or_default WEB_PORT 8001)}"
+    printf 'OLLAMA_BIND_IP=%s\n' "$ollama_bind_ip"
+    printf 'OLLAMA_PORT=%s\n' "$ollama_port"
     echo
 
     printf 'GPU_SLOT_COUNT=%s\n' "${#GPU_UUIDS[@]}"
@@ -675,6 +685,10 @@ print_plan() {
   local llm_model_dir="$3"
   local heading="${4:-Deployment plan}"
   local model_display
+  local web_bind_ip
+  local web_port
+  local ollama_bind_ip
+  local ollama_port
   local total_mib=0
   local largest_mib=0
   local memory
@@ -693,12 +707,18 @@ print_plan() {
     model_display="(not selected)"
   fi
 
+  web_bind_ip="${WEB_BIND_IP:-$(read_env_or_default WEB_BIND_IP 192.168.1.21)}"
+  web_port="${WEB_PORT:-$(read_env_or_default WEB_PORT 8001)}"
+  ollama_bind_ip="${OLLAMA_BIND_IP:-$(read_env_or_default OLLAMA_BIND_IP "$web_bind_ip")}"
+  ollama_port="${OLLAMA_PORT:-$(read_env_or_default OLLAMA_PORT 11434)}"
+
   echo "$heading:"
   echo "  project:      $(read_env_or_default LOCAL_AI_LLM_PROJECT_NAME local-ai-llm-legacy)"
   echo "  app service:  $APP_SERVICE"
   echo "  model service:$OLLAMA_SERVICE"
   echo "  default model:$model_display"
-  echo "  web bind:     ${WEB_BIND_IP:-$(read_env_or_default WEB_BIND_IP 192.168.1.21)}:${WEB_PORT:-$(read_env_or_default WEB_PORT 8001)}"
+  echo "  web bind:     $web_bind_ip:$web_port"
+  echo "  ollama API:   $ollama_bind_ip:$ollama_port"
   echo "  AI_ROOT:      $ai_root"
   echo "  LLM_MODEL_DIR:$llm_model_dir"
   echo "  GPU slots:    ${#GPU_UUIDS[@]} of max $MAX_GPU_SLOTS"
@@ -727,7 +747,7 @@ print_rendered_compose_summary() {
 
   echo
   echo "Rendered model/prewarm environment:"
-  grep -n -E 'DEFAULT_MODEL|PREWARM_DEFAULT_MODEL_ON_START|OLLAMA_BASE_URL|OLLAMA_MODELS' "$rendered_config" || true
+  grep -n -E 'DEFAULT_MODEL|PREWARM_DEFAULT_MODEL_ON_START|OLLAMA_BASE_URL|OLLAMA_MODELS|OLLAMA_BIND_IP|OLLAMA_PORT' "$rendered_config" || true
 
   echo
   echo "Rendered NVIDIA device reservations:"
@@ -766,7 +786,7 @@ run_validate_mode() {
 
   echo
   echo "Preview runtime environment values:"
-  grep -E '^(LOCAL_AI_LLM_PROJECT_NAME|LOCAL_AI_LLM_APP_CONTAINER_NAME|LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME|WEB_BIND_IP|WEB_PORT|GPU_SLOT_COUNT|GPU_SLOT_[0-3]|GPU_DEVICE_IDS|DEFAULT_MODEL|OLLAMA_IMAGE|PREWARM_DEFAULT_MODEL_ON_START)=' "$preview_env" || true
+  grep -E '^(LOCAL_AI_LLM_PROJECT_NAME|LOCAL_AI_LLM_APP_CONTAINER_NAME|LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME|WEB_BIND_IP|WEB_PORT|OLLAMA_BIND_IP|OLLAMA_PORT|GPU_SLOT_COUNT|GPU_SLOT_[0-3]|GPU_DEVICE_IDS|DEFAULT_MODEL|OLLAMA_IMAGE|PREWARM_DEFAULT_MODEL_ON_START)=' "$preview_env" || true
 
   log "Rendering Docker Compose configuration with temporary files"
   docker compose \
@@ -892,7 +912,7 @@ write_runtime_compose_file
 ensure_runtime_dirs "$ai_root" "$llm_model_dir"
 
 log "Active runtime settings"
-grep -E '^(LOCAL_AI_LLM_PROJECT_NAME|LOCAL_AI_LLM_APP_CONTAINER_NAME|LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME|WEB_BIND_IP|WEB_PORT|GPU_SLOT_COUNT|GPU_SLOT_[0-3]|GPU_DEVICE_IDS|DEFAULT_MODEL|OLLAMA_IMAGE)=' .env || true
+grep -E '^(LOCAL_AI_LLM_PROJECT_NAME|LOCAL_AI_LLM_APP_CONTAINER_NAME|LOCAL_AI_LLM_OLLAMA_CONTAINER_NAME|WEB_BIND_IP|WEB_PORT|OLLAMA_BIND_IP|OLLAMA_PORT|GPU_SLOT_COUNT|GPU_SLOT_[0-3]|GPU_DEVICE_IDS|DEFAULT_MODEL|OLLAMA_IMAGE)=' .env || true
 
 log "Rendering Compose configuration"
 compose config >/tmp/local-ai-llm-legacy-compose.yml
