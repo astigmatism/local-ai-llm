@@ -6,8 +6,8 @@ import { AppError, toErrorPayload, statusCodeForError } from './errors.ts';
 import type { Logger } from './logger.ts';
 import { buildOpenApiDocument } from './openapi.ts';
 import { toLegacyGpu } from './services/gpuService.ts';
-import type { AppConfig, GpuServiceLike, OllamaClientLike, OllamaImageGenerateOptions, RuntimeConfig } from './types.ts';
-import { validateModelLoadRequest, validateModelName } from './utils/validation.ts';
+import type { AppConfig, GpuServiceLike, OllamaChatMessage, OllamaClientLike, OllamaImageGenerateOptions, OllamaRunningModel, RuntimeConfig } from './types.ts';
+import { validateAssistantChatRequest, validateModelLoadRequest, validateModelName } from './utils/validation.ts';
 import { isDefaultModelLoaded } from './utils/modelState.ts';
 import { APPLICATION_VERSION, RUNTIME_NAME, SERVICE_NAME } from './version.ts';
 
@@ -74,6 +74,11 @@ async function routeRequest(method: string, url: URL, request: IncomingMessage, 
 
   if (method === 'GET' && pathName === '/api/capabilities') {
     await handleCapabilities(response, configStore, ollamaClient, runtimeConfig, logger);
+    return;
+  }
+
+  if (method === 'POST' && pathName === '/api/assistant/chat') {
+    await handleAssistantChat(request, response, ollamaClient, runtimeConfig);
     return;
   }
 
@@ -261,7 +266,7 @@ async function handleCapabilities(
 
   sendJson(response, 200, {
     ok: true,
-    textGeneration: false,
+    textGeneration: true,
     textStreaming: false,
     imageInput: imageGeneration.supportsImageInput === true,
     imageGeneration,
@@ -380,13 +385,17 @@ function buildModelCapabilityReport(imageGeneration: ImageGenerationCapability) 
     ollamaCapabilities: imageGeneration.modelCapabilities,
     textGeneration: {
       available: supportsTextGeneration,
-      exposedByService: false,
-      providerEndpoint: '/api/generate'
+      exposedByService: true,
+      serviceEndpoint: '/api/assistant/chat',
+      providerEndpoint: '/api/chat',
+      note: 'The service endpoint accepts prompt text only and selects the single currently loaded Ollama model server-side.'
     },
     chatCompletion: {
       available: supportsTextGeneration,
-      exposedByService: false,
-      providerEndpoint: '/api/chat'
+      exposedByService: true,
+      serviceEndpoint: '/api/assistant/chat',
+      providerEndpoint: '/api/chat',
+      note: 'Client requests cannot select or load models.'
     },
     textStreaming: {
       available: supportsTextGeneration,
@@ -441,6 +450,138 @@ function unsupportedImageGenerationReason(model: string, capabilities: string[],
     : '';
 
   return `Current model ${model} does not report Ollama image-generation capability "image".${reported}${imageInputNote} Select an Ollama image-generation model or configure a separate image-generation provider.`;
+}
+
+
+async function handleAssistantChat(
+  request: IncomingMessage,
+  response: ServerResponse,
+  ollamaClient: OllamaClientLike,
+  runtimeConfig: RuntimeConfig
+): Promise<void> {
+  const body = await readJsonBody(request);
+  const parsed = validateAssistantChatRequest(body);
+
+  if (!parsed.ok) {
+    sendJson(response, 422, parsed.response);
+    return;
+  }
+
+  let runningModels: OllamaRunningModel[];
+  try {
+    runningModels = await ollamaClient.listRunningModels();
+  } catch (error: unknown) {
+    sendJson(response, statusCodeForError(error, 503), toErrorPayload(error, 'ASSISTANT_RUNNING_MODEL_CHECK_FAILED'));
+    return;
+  }
+
+  const selectedModel = resolveExactlyOneLoadedModel(runningModels);
+  if (!selectedModel.ok) {
+    sendJson(response, selectedModel.statusCode, selectedModel.payload);
+    return;
+  }
+
+  const abortController = new AbortController();
+  const abortAssistantChat = () => {
+    if (!response.writableEnded) abortController.abort();
+  };
+  request.on('aborted', abortAssistantChat);
+  response.on('close', abortAssistantChat);
+
+  try {
+    const messages = buildAssistantMessages(parsed.value.prompt, parsed.value.system_prompt);
+    const result = await ollamaClient.chat({
+      model: selectedModel.model,
+      messages,
+      timeoutMs: runtimeConfig.ollamaRequestTimeoutMs,
+      signal: abortController.signal
+    });
+
+    sendJson(response, 200, {
+      ok: true,
+      text: result.text,
+      model: result.model,
+      metadata: {
+        provider: 'ollama',
+        endpoint: '/api/chat',
+        loadedModelCount: runningModels.length,
+        ...result.metadata
+      }
+    });
+  } catch (error: unknown) {
+    sendJson(response, statusCodeForError(error, 502), toErrorPayload(error, 'ASSISTANT_CHAT_FAILED'));
+  } finally {
+    request.off('aborted', abortAssistantChat);
+    response.off('close', abortAssistantChat);
+  }
+}
+
+function buildAssistantMessages(prompt: string, systemPrompt?: string): OllamaChatMessage[] {
+  return [
+    ...(systemPrompt === undefined ? [] : [{ role: 'system' as const, content: systemPrompt }]),
+    { role: 'user' as const, content: prompt }
+  ];
+}
+
+function resolveExactlyOneLoadedModel(runningModels: OllamaRunningModel[]):
+  | { ok: true; model: string }
+  | { ok: false; statusCode: number; payload: { ok: false; error: { code: string; message: string; details?: unknown } } } {
+  if (runningModels.length === 0) {
+    return {
+      ok: false,
+      statusCode: 503,
+      payload: {
+        ok: false,
+        error: {
+          code: 'ASSISTANT_MODEL_NOT_LOADED',
+          message: 'No Ollama model is currently loaded. The assistant chat endpoint fails closed rather than selecting or loading a model.'
+        }
+      }
+    };
+  }
+
+  if (runningModels.length > 1) {
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: {
+        ok: false,
+        error: {
+          code: 'ASSISTANT_MODEL_AMBIGUOUS',
+          message: 'More than one Ollama model is currently loaded. The assistant chat endpoint fails closed because it cannot safely infer which model to use.',
+          details: {
+            loadedModels: runningModels.map((model) => ({ name: model.name ?? null, model: model.model ?? null }))
+          }
+        }
+      }
+    };
+  }
+
+  const onlyModel = runningModels[0];
+  const modelName = readRunningModelIdentifier(onlyModel);
+  if (!modelName) {
+    return {
+      ok: false,
+      statusCode: 503,
+      payload: {
+        ok: false,
+        error: {
+          code: 'ASSISTANT_MODEL_IDENTIFIER_MISSING',
+          message: 'Exactly one Ollama model is loaded, but its running-model record does not contain a usable model identifier.',
+          details: { loadedModel: onlyModel }
+        }
+      }
+    };
+  }
+
+  return { ok: true, model: modelName };
+}
+
+function readRunningModelIdentifier(model: OllamaRunningModel | undefined): string | null {
+  if (!model) return null;
+  if (typeof model.model === 'string' && model.model.trim()) return model.model.trim();
+  if (typeof model.name === 'string' && model.name.trim()) return model.name.trim();
+  return null;
 }
 
 async function handleImageGeneration(

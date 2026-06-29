@@ -1,6 +1,8 @@
 import { AppError } from '../errors.ts';
 import type {
   GeneratedImageData,
+  OllamaChatRequest,
+  OllamaChatResult,
   OllamaClientLike,
   OllamaImageGenerateRequest,
   OllamaImageGenerateResult,
@@ -77,6 +79,21 @@ export class OllamaClient implements OllamaClientLike {
     }, timeoutMs);
 
     return { model, response };
+  }
+
+
+  async chat(request: OllamaChatRequest): Promise<OllamaChatResult> {
+    const response = await this.request<unknown>('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: request.model,
+        messages: request.messages,
+        stream: false
+      })
+    }, request.timeoutMs ?? this.defaultTimeoutMs, request.signal);
+
+    return parseOllamaChatResponse(response, request.model);
   }
 
   async generateImage(request: OllamaImageGenerateRequest): Promise<OllamaImageGenerateResult> {
@@ -157,6 +174,51 @@ export class OllamaClient implements OllamaClientLike {
       clearTimeout(timeout);
     }
   }
+}
+
+
+export function parseOllamaChatResponse(body: unknown, requestedModel: string): OllamaChatResult {
+  const records = extractResponseRecords(body);
+  const finalRecord = [...records].reverse().find((record) => readOllamaChatText(record) !== undefined) ?? records.at(-1);
+
+  if (!finalRecord) {
+    throw new AppError('OLLAMA_CHAT_RESPONSE_EMPTY', 'Ollama returned an empty chat response.', 502, {
+      model: requestedModel
+    });
+  }
+
+  const text = readOllamaChatText(finalRecord);
+  if (!text) {
+    throw new AppError('OLLAMA_CHAT_RESPONSE_EMPTY', 'Ollama completed the chat request without assistant text.', 502, {
+      model: requestedModel,
+      done: finalRecord.done,
+      done_reason: finalRecord.done_reason
+    });
+  }
+
+  const metadata: Record<string, unknown> = { ...finalRecord };
+  delete metadata.message;
+  delete metadata.response;
+
+  return {
+    model: typeof finalRecord.model === 'string' && finalRecord.model.trim() ? finalRecord.model.trim() : requestedModel,
+    text,
+    metadata
+  };
+}
+
+function readOllamaChatText(record: Record<string, unknown>): string | undefined {
+  if (isRecord(record.message) && typeof record.message.content === 'string') {
+    const content = record.message.content.trim();
+    return content === '' ? undefined : content;
+  }
+
+  if (typeof record.response === 'string') {
+    const content = record.response.trim();
+    return content === '' ? undefined : content;
+  }
+
+  return undefined;
 }
 
 export function parseOllamaImageGenerationResponse(body: unknown, requestedModel: string): OllamaImageGenerateResult {

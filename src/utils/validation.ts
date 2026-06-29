@@ -23,7 +23,15 @@ export interface ImageGenerateRequest {
   options?: ImageGenerationOptions;
 }
 
+export interface AssistantChatRequest {
+  prompt: string;
+  system_prompt?: string;
+}
+
 const MODEL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
+const MIN_ASSISTANT_PROMPT_CHARS = 1;
+const MAX_ASSISTANT_PROMPT_CHARS = 16000;
+const MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 4000;
 const MIN_IMAGE_DIMENSION = 64;
 const MAX_IMAGE_DIMENSION = 4096;
 const MIN_IMAGE_STEPS = 1;
@@ -76,6 +84,104 @@ export function validateModelName(value: unknown, loc: Array<string | number>): 
   }
 
   return [];
+}
+
+
+export function validateAssistantChatRequest(body: unknown): { ok: true; value: AssistantChatRequest } | { ok: false; response: ValidationErrorResponse } {
+  const details: ValidationDetail[] = [];
+
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    return {
+      ok: false,
+      response: {
+        detail: [{
+          loc: ['body'],
+          msg: 'Input should be a valid object',
+          type: 'model_attributes_type',
+          input: body,
+          ctx: {}
+        }]
+      }
+    };
+  }
+
+  const record = body as Record<string, unknown>;
+
+  if (Object.prototype.hasOwnProperty.call(record, 'model')) {
+    details.push({
+      loc: ['body', 'model'],
+      msg: 'Model selection is not accepted by this endpoint. The currently loaded Ollama model is selected server-side.',
+      type: 'extra_forbidden',
+      input: record.model,
+      ctx: {}
+    });
+  }
+
+  if (typeof record.prompt !== 'string') {
+    details.push({
+      loc: ['body', 'prompt'],
+      msg: 'Input should be a valid string',
+      type: 'string_type',
+      input: record.prompt,
+      ctx: {}
+    });
+  } else {
+    const prompt = record.prompt.trim();
+    if (prompt.length < MIN_ASSISTANT_PROMPT_CHARS) {
+      details.push({
+        loc: ['body', 'prompt'],
+        msg: 'String should have at least 1 character',
+        type: 'string_too_short',
+        input: record.prompt,
+        ctx: { min_length: MIN_ASSISTANT_PROMPT_CHARS }
+      });
+    }
+    if (prompt.length > MAX_ASSISTANT_PROMPT_CHARS) {
+      details.push({
+        loc: ['body', 'prompt'],
+        msg: `String should have at most ${MAX_ASSISTANT_PROMPT_CHARS} characters`,
+        type: 'string_too_long',
+        input: record.prompt,
+        ctx: { max_length: MAX_ASSISTANT_PROMPT_CHARS }
+      });
+    }
+  }
+
+  if (record.system_prompt !== undefined) {
+    if (typeof record.system_prompt !== 'string') {
+      details.push({
+        loc: ['body', 'system_prompt'],
+        msg: 'Input should be a valid string',
+        type: 'string_type',
+        input: record.system_prompt,
+        ctx: {}
+      });
+    } else if (record.system_prompt.trim().length > MAX_ASSISTANT_SYSTEM_PROMPT_CHARS) {
+      details.push({
+        loc: ['body', 'system_prompt'],
+        msg: `String should have at most ${MAX_ASSISTANT_SYSTEM_PROMPT_CHARS} characters`,
+        type: 'string_too_long',
+        input: record.system_prompt,
+        ctx: { max_length: MAX_ASSISTANT_SYSTEM_PROMPT_CHARS }
+      });
+    }
+  }
+
+  if (details.length > 0) {
+    return { ok: false, response: { detail: details } };
+  }
+
+  const systemPrompt = typeof record.system_prompt === 'string' && record.system_prompt.trim() !== ''
+    ? record.system_prompt.trim()
+    : undefined;
+
+  return {
+    ok: true,
+    value: {
+      prompt: String(record.prompt).trim(),
+      ...(systemPrompt === undefined ? {} : { system_prompt: systemPrompt })
+    }
+  };
 }
 
 export function validateModelLoadRequest(body: unknown): { ok: true; value: ModelLoadRequest } | { ok: false; response: ValidationErrorResponse } {

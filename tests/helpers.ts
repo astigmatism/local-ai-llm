@@ -9,6 +9,8 @@ import { createLogger } from '../src/logger.ts';
 import type {
   GeneratedImageData,
   GpuServiceLike,
+  OllamaChatRequest,
+  OllamaChatResult,
   GpuTelemetry,
   OllamaClientLike,
   OllamaImageGenerateRequest,
@@ -50,7 +52,9 @@ export function mockOllama(
   installedModels: OllamaInstalledModel[] = [],
   generatedImage: GeneratedImageData = { mimeType: 'image/png', base64: tinyPngBase64, width: 1, height: 1 },
   onGenerateImage?: (request: OllamaImageGenerateRequest) => void,
-  modelInfo: OllamaModelInformation = { capabilities: ['completion'] }
+  modelInfo: OllamaModelInformation = { capabilities: ['completion'] },
+  onChat?: (request: OllamaChatRequest) => void,
+  chatResult: OllamaChatResult = { model: 'qwen3:14b', text: 'assistant test response', metadata: { done: true, done_reason: 'stop' } }
 ): OllamaClientLike {
   return {
     async getVersion() {
@@ -74,6 +78,13 @@ export function mockOllama(
         model: request.model,
         images: [generatedImage],
         metadata: { done: true, done_reason: 'stop' }
+      };
+    },
+    async chat(request: OllamaChatRequest) {
+      onChat?.(request);
+      return {
+        ...chatResult,
+        model: chatResult.model || request.model
       };
     }
   };

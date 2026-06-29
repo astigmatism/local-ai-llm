@@ -124,3 +124,56 @@ test('OllamaClient rejects image-generation responses that do not contain image 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('OllamaClient sends chat requests to /api/chat with stream false', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<[string, RequestInit]> = [];
+
+  globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+    calls.push([String(url), init ?? {}]);
+    return new Response(JSON.stringify({
+      model: 'qwen3.6:loaded-test',
+      message: { role: 'assistant', content: 'voice test ok' },
+      done: true,
+      done_reason: 'stop'
+    }), { status: 200 });
+  };
+
+  try {
+    const client = new OllamaClient('http://ollama.test/', 1000);
+    const result = await client.chat({
+      model: 'qwen3.6:loaded-test',
+      messages: [{ role: 'user', content: 'Reply with exactly: voice test ok' }],
+      timeoutMs: 2000
+    });
+
+    assert.equal(calls[0]?.[0], 'http://ollama.test/api/chat');
+    assert.deepEqual(JSON.parse(String(calls[0]?.[1].body)), {
+      model: 'qwen3.6:loaded-test',
+      messages: [{ role: 'user', content: 'Reply with exactly: voice test ok' }],
+      stream: false
+    });
+    assert.equal(result.model, 'qwen3.6:loaded-test');
+    assert.equal(result.text, 'voice test ok');
+    assert.equal(result.metadata.done, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('OllamaClient rejects chat responses without assistant text', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ model: 'qwen3:14b', done: true }), { status: 200 });
+
+  try {
+    const client = new OllamaClient('http://ollama.test', 1000);
+    await assert.rejects(client.chat({
+      model: 'qwen3:14b',
+      messages: [{ role: 'user', content: 'hello' }]
+    }), (error: unknown) => {
+      return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'OLLAMA_CHAT_RESPONSE_EMPTY';
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

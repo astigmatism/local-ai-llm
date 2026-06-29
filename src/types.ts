@@ -86,6 +86,26 @@ export interface OllamaImageGenerateResult {
   metadata: Record<string, unknown>;
 }
 
+export type OllamaChatRole = 'system' | 'user' | 'assistant';
+
+export interface OllamaChatMessage {
+  role: OllamaChatRole;
+  content: string;
+}
+
+export interface OllamaChatRequest {
+  model: string;
+  messages: OllamaChatMessage[];
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface OllamaChatResult {
+  model: string;
+  text: string;
+  metadata: Record<string, unknown>;
+}
+
 export interface GpuTelemetry {
   index: number;
   uuid: string | null;
@@ -125,6 +145,7 @@ export interface OllamaClientLike {
   showModel(model: string): Promise<OllamaModelInformation>;
   prewarmModel(model: string, keepAlive: string | number, timeoutMs?: number): Promise<PrewarmResult>;
   generateImage(request: OllamaImageGenerateRequest): Promise<OllamaImageGenerateResult>;
+  chat(request: OllamaChatRequest): Promise<OllamaChatResult>;
 }
 
 export interface GpuServiceLike {

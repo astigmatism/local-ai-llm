@@ -115,6 +115,17 @@ const gpuSchema = {
   }
 } as const;
 
+const assistantChatResponseSchema = {
+  type: 'object',
+  required: ['ok', 'text', 'model', 'metadata'],
+  properties: {
+    ok: { const: true },
+    text: { type: 'string' },
+    model: { type: 'string', description: 'The currently loaded Ollama model selected server-side. Clients do not submit this value.' },
+    metadata: { type: 'object', additionalProperties: true }
+  }
+} as const;
+
 const generatedImageSchema = {
   type: 'object',
   required: ['mimeType', 'base64'],
@@ -296,6 +307,35 @@ export function buildOpenApiDocument() {
                 }
               }
             }
+          }
+        }
+      },
+      '/api/assistant/chat': {
+        post: {
+          summary: 'Generate assistant text with the single currently loaded Ollama model',
+          description: 'Private orchestrator-facing endpoint for voice assistants. The request intentionally does not accept a model field. The service checks Ollama running-model state, requires exactly one loaded model, and fails closed instead of selecting or loading models.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['prompt'],
+                  additionalProperties: true,
+                  properties: {
+                    prompt: { type: 'string', minLength: 1, maxLength: 16000 },
+                    system_prompt: { type: 'string', maxLength: 4000 }
+                  }
+                }
+              }
+            }
+          },
+          responses: {
+            '200': { description: 'Assistant response text', content: { 'application/json': { schema: assistantChatResponseSchema } } },
+            '409': { description: 'Multiple loaded models make model selection ambiguous', content: { 'application/json': { schema: errorSchema } } },
+            '422': { description: 'Validation error', content: { 'application/json': { schema: validationErrorSchema } } },
+            '502': { description: 'Ollama chat request failed', content: { 'application/json': { schema: errorSchema } } },
+            '503': { description: 'No usable loaded model or Ollama unavailable', content: { 'application/json': { schema: errorSchema } } }
           }
         }
       },
@@ -489,6 +529,7 @@ export function buildOpenApiDocument() {
         InstalledModel: installedModelSchema,
         GpuTelemetry: gpuSchema,
         LegacyGpuTelemetry: legacyGpuSchema,
+        AssistantChatResponse: assistantChatResponseSchema,
         GeneratedImage: generatedImageSchema,
         ImageGenerationCapability: imageGenerationCapabilitySchema,
         ModelCapabilityReport: modelCapabilityReportSchema
